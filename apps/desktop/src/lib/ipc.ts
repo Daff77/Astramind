@@ -1,4 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { open as openNativeDialog } from "@tauri-apps/plugin-dialog";
 import type {
   AppHealthDto,
   BacklinkHit,
@@ -14,10 +16,13 @@ import type {
   Page,
   ReconcileSummary,
   RestoreResult,
+  RevisionSummaryDto,
   SearchFilters,
   SearchHit,
+  TrashedNoteSummary,
   VaultOpenReport,
   VaultSummary,
+  WatcherEventDto,
 } from "./contracts";
 
 const VALID_ERROR_CODES = new Set<ErrorCode>([
@@ -275,4 +280,73 @@ export function exportVaultFiles(
   destination: string,
 ): Promise<number> {
   return invokeTyped<number>("export_vault_files", { vaultId, destination });
+}
+
+export function setPinned(
+  vaultId: string,
+  noteId: string,
+  pinned: boolean,
+): Promise<boolean> {
+  return invokeTyped<boolean>("set_pinned", { vaultId, noteId, pinned });
+}
+
+export function listRevisions(
+  vaultId: string,
+  noteId: string,
+): Promise<RevisionSummaryDto[]> {
+  return invokeTyped<RevisionSummaryDto[]>("list_revisions", {
+    vaultId,
+    noteId,
+  });
+}
+
+export function listTrashedNotes(
+  vaultId: string,
+): Promise<TrashedNoteSummary[]> {
+  return invokeTyped<TrashedNoteSummary[]>("list_trashed_notes", { vaultId });
+}
+
+export function isTauriRuntime(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+export function createRequestId(): string {
+  if (
+    typeof crypto !== "undefined" &&
+    typeof crypto.randomUUID === "function"
+  ) {
+    return crypto.randomUUID();
+  }
+  return `req-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+export async function pickDirectoryDialog(
+  title = "Select Folder",
+): Promise<string | null> {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+  const selected = await openNativeDialog({
+    directory: true,
+    multiple: false,
+    title,
+  });
+  return typeof selected === "string" && selected.length > 0 ? selected : null;
+}
+
+export async function subscribeVaultReconciled(
+  handler: (event: WatcherEventDto) => void,
+): Promise<() => void> {
+  if (!isTauriRuntime()) {
+    return () => {};
+  }
+  const unlisten: UnlistenFn = await listen<WatcherEventDto>(
+    "vault:reconciled",
+    (event) => {
+      handler(event.payload);
+    },
+  );
+  return () => {
+    unlisten();
+  };
 }

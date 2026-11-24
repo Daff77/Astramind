@@ -1,76 +1,193 @@
 use brain_core::backup::{create_backup, export_vault, restore_backup};
-use brain_core::domain::errors::ErrorEnvelope;
+use brain_core::domain::errors::{CoreError, ErrorEnvelope};
 use brain_core::domain::ids::{NoteId, RevisionId, VaultId};
 use brain_core::domain::types::{
     ActorContext, AppHealthDto, BacklinkHit, BackupResult, BrokenLinkDto, GraphSnapshotDto,
     MovePlan, MutationResult, NoteSnapshot, NoteSummary, Page, ReconcileSummary, RestoreResult,
-    SearchFilters, SearchHit, VaultOpenReport, VaultSummary,
+    RevisionSummaryDto, SearchFilters, SearchHit, TrashedNoteSummary, VaultOpenReport,
+    VaultSummary,
 };
 use brain_core::health_check;
 use brain_core::paths::AppPathsSpec;
 use brain_core::retrieval::{get_backlinks, get_broken_links, get_graph, search_notes};
 use brain_core::vault::engine::VaultEngine;
-use std::path::Path;
+use brain_core::vault::watcher::VaultWatcher;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tauri::{AppHandle, Emitter, Manager, State};
+
+#[derive(Default)]
+pub struct DesktopRuntimeState {
+    active_watcher: Mutex<Option<(VaultId, VaultWatcher)>>,
+}
+
+impl DesktopRuntimeState {
+    fn activate_watcher(
+        &self,
+        app: &AppHandle,
+        paths: &AppPathsSpec,
+        vault_id: &VaultId,
+        vault_root: PathBuf,
+    ) {
+        let mut guard = match self.active_watcher.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some((current_id, _)) = guard.as_ref() {
+            if current_id == vault_id {
+                return;
+            }
+        }
+        // Tear down prior watcher cleanly before starting the new vault watcher.
+        if let Some((_, old)) = guard.take() {
+            old.stop();
+        }
+        let app_handle = app.clone();
+        let cb = Arc::new(move |ev| {
+            let _ = app_handle.emit("vault:reconciled", ev);
+        });
+        if let Ok(watcher) = VaultWatcher::start_with_callback(
+            paths.clone(),
+            vault_id.clone(),
+            vault_root,
+            Duration::from_millis(250),
+            Some(cb),
+        ) {
+            *guard = Some((vault_id.clone(), watcher));
+        }
+    }
+
+    fn record_self_write(&self, vault_id: &VaultId, rel_path: &str, content_hash: &str) {
+        if let Ok(guard) = self.active_watcher.lock() {
+            if let Some((active_id, watcher)) = guard.as_ref() {
+                if active_id == vault_id {
+                    watcher.record_self_write(rel_path, content_hash);
+                }
+            }
+        }
+    }
+
+    fn stop_watcher(&self) {
+        let mut guard = match self.active_watcher.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some((_, watcher)) = guard.take() {
+            watcher.stop();
+        }
+    }
+}
 
 fn resolve_paths() -> Result<AppPathsSpec, ErrorEnvelope> {
     AppPathsSpec::resolve_default().map_err(|err| err.into_envelope(None))
 }
 
-#[tauri::command]
-fn app_health() -> Result<AppHealthDto, ErrorEnvelope> {
-    health_check().map_err(|err| err.into_envelope(None))
+async fn run_blocking<T, F>(f: F) -> Result<T, ErrorEnvelope>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, CoreError> + Send + 'static,
+{
+    match tauri::async_runtime::spawn_blocking(f).await {
+        Ok(res) => res.map_err(|err| err.into_envelope(None)),
+        Err(join_err) => Err(CoreError::IoFailed(format!(
+            "background worker task failed: {join_err}"
+        ))
+        .into_envelope(None)),
+    }
 }
 
 #[tauri::command]
-fn list_vaults() -> Result<Vec<VaultSummary>, ErrorEnvelope> {
+async fn app_health() -> Result<AppHealthDto, ErrorEnvelope> {
+    run_blocking(health_check).await
+}
+
+#[tauri::command]
+async fn list_vaults() -> Result<Vec<VaultSummary>, ErrorEnvelope> {
     let paths = resolve_paths()?;
-    VaultEngine::list_vaults(&paths).map_err(|err| err.into_envelope(None))
+    run_blocking(move || VaultEngine::list_vaults(&paths)).await
 }
 
 #[tauri::command]
-fn create_vault(
+async fn create_vault(
+    app: AppHandle,
+    runtime: State<'_, DesktopRuntimeState>,
     selected_root: String,
     display_name: Option<String>,
 ) -> Result<VaultOpenReport, ErrorEnvelope> {
     let paths = resolve_paths()?;
-    VaultEngine::create_vault(&paths, Path::new(&selected_root), display_name.as_deref())
-        .map_err(|err| err.into_envelope(None))
+    let paths_clone = paths.clone();
+    let report = run_blocking(move || {
+        VaultEngine::create_vault(
+            &paths_clone,
+            Path::new(&selected_root),
+            display_name.as_deref(),
+        )
+    })
+    .await?;
+    runtime.activate_watcher(
+        &app,
+        &paths,
+        &report.vault.vault_id,
+        PathBuf::from(&report.vault.root_path),
+    );
+    Ok(report)
 }
 
 #[tauri::command]
-fn open_vault(selected_root: String) -> Result<VaultOpenReport, ErrorEnvelope> {
+async fn open_vault(
+    app: AppHandle,
+    runtime: State<'_, DesktopRuntimeState>,
+    selected_root: String,
+) -> Result<VaultOpenReport, ErrorEnvelope> {
     let paths = resolve_paths()?;
-    VaultEngine::open_vault(&paths, Path::new(&selected_root))
-        .map_err(|err| err.into_envelope(None))
+    let paths_clone = paths.clone();
+    let report =
+        run_blocking(move || VaultEngine::open_vault(&paths_clone, Path::new(&selected_root)))
+            .await?;
+    runtime.activate_watcher(
+        &app,
+        &paths,
+        &report.vault.vault_id,
+        PathBuf::from(&report.vault.root_path),
+    );
+    Ok(report)
 }
 
 #[tauri::command]
-fn list_notes(vault_id: VaultId) -> Result<Vec<NoteSummary>, ErrorEnvelope> {
+async fn list_notes(vault_id: VaultId) -> Result<Vec<NoteSummary>, ErrorEnvelope> {
     let paths = resolve_paths()?;
-    VaultEngine::list_notes(&paths, &vault_id).map_err(|err| err.into_envelope(None))
+    run_blocking(move || VaultEngine::list_notes(&paths, &vault_id)).await
 }
 
 #[tauri::command]
-fn read_note(vault_id: VaultId, note_id: NoteId) -> Result<NoteSnapshot, ErrorEnvelope> {
+async fn read_note(vault_id: VaultId, note_id: NoteId) -> Result<NoteSnapshot, ErrorEnvelope> {
     let paths = resolve_paths()?;
-    VaultEngine::read_note(&paths, &vault_id, &note_id).map_err(|err| err.into_envelope(None))
+    run_blocking(move || VaultEngine::read_note(&paths, &vault_id, &note_id)).await
 }
 
 #[tauri::command]
-fn create_note(
+async fn create_note(
+    runtime: State<'_, DesktopRuntimeState>,
     vault_id: VaultId,
     rel_path: String,
     body: String,
     request_id: String,
 ) -> Result<MutationResult, ErrorEnvelope> {
     let paths = resolve_paths()?;
-    let actor = ActorContext::desktop("local-user");
-    VaultEngine::create_note(&paths, &actor, &vault_id, &rel_path, &body, &request_id)
-        .map_err(|err| err.into_envelope(None))
+    let vid = vault_id.clone();
+    let res = run_blocking(move || {
+        let actor = ActorContext::desktop("local-user");
+        VaultEngine::create_note(&paths, &actor, &vid, &rel_path, &body, &request_id)
+    })
+    .await?;
+    runtime.record_self_write(&vault_id, &res.rel_path, &res.content_hash);
+    Ok(res)
 }
 
 #[tauri::command]
-fn save_note(
+async fn save_note(
+    runtime: State<'_, DesktopRuntimeState>,
     vault_id: VaultId,
     note_id: NoteId,
     expected_hash: String,
@@ -78,96 +195,142 @@ fn save_note(
     request_id: String,
 ) -> Result<MutationResult, ErrorEnvelope> {
     let paths = resolve_paths()?;
-    let actor = ActorContext::desktop("local-user");
-    VaultEngine::save_note(
-        &paths,
-        &actor,
-        &vault_id,
-        &note_id,
-        &expected_hash,
-        &body,
-        &request_id,
-    )
-    .map_err(|err| err.into_envelope(None))
+    let vid = vault_id.clone();
+    let res = run_blocking(move || {
+        let actor = ActorContext::desktop("local-user");
+        VaultEngine::save_note(
+            &paths,
+            &actor,
+            &vid,
+            &note_id,
+            &expected_hash,
+            &body,
+            &request_id,
+        )
+    })
+    .await?;
+    runtime.record_self_write(&vault_id, &res.rel_path, &res.content_hash);
+    Ok(res)
 }
 
 #[tauri::command]
-fn preview_move(
+async fn preview_move(
     vault_id: VaultId,
     note_id: NoteId,
     destination: String,
 ) -> Result<MovePlan, ErrorEnvelope> {
     let paths = resolve_paths()?;
-    VaultEngine::preview_move(&paths, &vault_id, &note_id, &destination)
-        .map_err(|err| err.into_envelope(None))
+    run_blocking(move || VaultEngine::preview_move(&paths, &vault_id, &note_id, &destination)).await
 }
 
 #[tauri::command]
-fn move_note(
+async fn move_note(
+    runtime: State<'_, DesktopRuntimeState>,
     plan: MovePlan,
     expected_hash: String,
     request_id: String,
 ) -> Result<MutationResult, ErrorEnvelope> {
     let paths = resolve_paths()?;
-    let actor = ActorContext::desktop("local-user");
-    VaultEngine::move_note(&paths, &actor, &plan, &expected_hash, &request_id)
-        .map_err(|err| err.into_envelope(None))
+    let vault_id = plan.vault_id.clone();
+    let res = run_blocking(move || {
+        let actor = ActorContext::desktop("local-user");
+        VaultEngine::move_note(&paths, &actor, &plan, &expected_hash, &request_id)
+    })
+    .await?;
+    runtime.record_self_write(&vault_id, &res.rel_path, &res.content_hash);
+    Ok(res)
 }
 
 #[tauri::command]
-fn trash_note(
+async fn trash_note(
+    runtime: State<'_, DesktopRuntimeState>,
     vault_id: VaultId,
     note_id: NoteId,
     expected_hash: String,
     request_id: String,
 ) -> Result<MutationResult, ErrorEnvelope> {
     let paths = resolve_paths()?;
-    let actor = ActorContext::desktop("local-user");
-    VaultEngine::trash_note(
-        &paths,
-        &actor,
-        &vault_id,
-        &note_id,
-        &expected_hash,
-        &request_id,
-    )
-    .map_err(|err| err.into_envelope(None))
+    let vid = vault_id.clone();
+    let res = run_blocking(move || {
+        let actor = ActorContext::desktop("local-user");
+        VaultEngine::trash_note(&paths, &actor, &vid, &note_id, &expected_hash, &request_id)
+    })
+    .await?;
+    runtime.record_self_write(&vault_id, &res.rel_path, &res.content_hash);
+    Ok(res)
 }
 
 #[tauri::command]
-fn restore_trashed_note(
+async fn restore_trashed_note(
+    runtime: State<'_, DesktopRuntimeState>,
     vault_id: VaultId,
     note_id: NoteId,
     request_id: String,
 ) -> Result<MutationResult, ErrorEnvelope> {
     let paths = resolve_paths()?;
-    let actor = ActorContext::desktop("local-user");
-    VaultEngine::restore_trashed_note(&paths, &actor, &vault_id, &note_id, &request_id)
-        .map_err(|err| err.into_envelope(None))
+    let vid = vault_id.clone();
+    let res = run_blocking(move || {
+        let actor = ActorContext::desktop("local-user");
+        VaultEngine::restore_trashed_note(&paths, &actor, &vid, &note_id, &request_id)
+    })
+    .await?;
+    runtime.record_self_write(&vault_id, &res.rel_path, &res.content_hash);
+    Ok(res)
 }
 
 #[tauri::command]
-fn restore_revision(
+async fn restore_revision(
+    runtime: State<'_, DesktopRuntimeState>,
     vault_id: VaultId,
     revision_id: RevisionId,
     expected_current_hash: String,
     request_id: String,
 ) -> Result<MutationResult, ErrorEnvelope> {
     let paths = resolve_paths()?;
-    let actor = ActorContext::desktop("local-user");
-    VaultEngine::restore_revision(
-        &paths,
-        &actor,
-        &vault_id,
-        &revision_id,
-        &expected_current_hash,
-        &request_id,
-    )
-    .map_err(|err| err.into_envelope(None))
+    let vid = vault_id.clone();
+    let res = run_blocking(move || {
+        let actor = ActorContext::desktop("local-user");
+        VaultEngine::restore_revision(
+            &paths,
+            &actor,
+            &vid,
+            &revision_id,
+            &expected_current_hash,
+            &request_id,
+        )
+    })
+    .await?;
+    runtime.record_self_write(&vault_id, &res.rel_path, &res.content_hash);
+    Ok(res)
 }
 
 #[tauri::command]
-fn search_vault_notes(
+async fn set_pinned(
+    vault_id: VaultId,
+    note_id: NoteId,
+    pinned: bool,
+) -> Result<bool, ErrorEnvelope> {
+    let paths = resolve_paths()?;
+    run_blocking(move || VaultEngine::set_pinned(&paths, &vault_id, &note_id, pinned)).await
+}
+
+#[tauri::command]
+async fn list_revisions(
+    vault_id: VaultId,
+    note_id: NoteId,
+) -> Result<Vec<RevisionSummaryDto>, ErrorEnvelope> {
+    let paths = resolve_paths()?;
+    run_blocking(move || VaultEngine::list_revisions(&paths, &vault_id, &note_id)).await
+}
+
+#[tauri::command]
+async fn list_trashed_notes(vault_id: VaultId) -> Result<Vec<TrashedNoteSummary>, ErrorEnvelope> {
+    let paths = resolve_paths()?;
+    run_blocking(move || VaultEngine::list_trashed_notes(&paths, &vault_id)).await
+}
+
+#[tauri::command]
+async fn search_vault_notes(
     vault_id: VaultId,
     query: String,
     filters: SearchFilters,
@@ -175,72 +338,79 @@ fn search_vault_notes(
     cursor: Option<String>,
 ) -> Result<Page<SearchHit>, ErrorEnvelope> {
     let paths = resolve_paths()?;
-    search_notes(
-        &paths,
-        &vault_id,
-        &query,
-        &filters,
-        limit,
-        cursor.as_deref(),
-    )
-    .map_err(|err| err.into_envelope(None))
+    run_blocking(move || {
+        search_notes(
+            &paths,
+            &vault_id,
+            &query,
+            &filters,
+            limit,
+            cursor.as_deref(),
+        )
+    })
+    .await
 }
 
 #[tauri::command]
-fn get_note_backlinks(
+async fn get_note_backlinks(
     vault_id: VaultId,
     note_id: NoteId,
 ) -> Result<Vec<BacklinkHit>, ErrorEnvelope> {
     let paths = resolve_paths()?;
-    get_backlinks(&paths, &vault_id, &note_id).map_err(|err| err.into_envelope(None))
+    run_blocking(move || get_backlinks(&paths, &vault_id, &note_id)).await
 }
 
 #[tauri::command]
-fn get_vault_broken_links(vault_id: VaultId) -> Result<Vec<BrokenLinkDto>, ErrorEnvelope> {
+async fn get_vault_broken_links(vault_id: VaultId) -> Result<Vec<BrokenLinkDto>, ErrorEnvelope> {
     let paths = resolve_paths()?;
-    get_broken_links(&paths, &vault_id).map_err(|err| err.into_envelope(None))
+    run_blocking(move || get_broken_links(&paths, &vault_id)).await
 }
 
 #[tauri::command]
-fn get_vault_graph(vault_id: VaultId) -> Result<GraphSnapshotDto, ErrorEnvelope> {
+async fn get_vault_graph(vault_id: VaultId) -> Result<GraphSnapshotDto, ErrorEnvelope> {
     let paths = resolve_paths()?;
-    get_graph(&paths, &vault_id).map_err(|err| err.into_envelope(None))
+    run_blocking(move || get_graph(&paths, &vault_id)).await
 }
 
 #[tauri::command]
-fn rebuild_vault_index(vault_id: VaultId) -> Result<ReconcileSummary, ErrorEnvelope> {
+async fn rebuild_vault_index(vault_id: VaultId) -> Result<ReconcileSummary, ErrorEnvelope> {
     let paths = resolve_paths()?;
-    VaultEngine::rebuild_index(&paths, &vault_id).map_err(|err| err.into_envelope(None))
+    run_blocking(move || VaultEngine::rebuild_index(&paths, &vault_id)).await
 }
 
 #[tauri::command]
-fn create_vault_backup(
+async fn create_vault_backup(
     vault_id: VaultId,
     destination: String,
 ) -> Result<BackupResult, ErrorEnvelope> {
     let paths = resolve_paths()?;
-    create_backup(&paths, &vault_id, Path::new(&destination)).map_err(|err| err.into_envelope(None))
+    run_blocking(move || create_backup(&paths, &vault_id, Path::new(&destination))).await
 }
 
 #[tauri::command]
-fn restore_vault_backup(
+async fn restore_vault_backup(
     backup_dir: String,
     destination: String,
 ) -> Result<RestoreResult, ErrorEnvelope> {
     let paths = resolve_paths()?;
-    restore_backup(&paths, Path::new(&backup_dir), Path::new(&destination))
-        .map_err(|err| err.into_envelope(None))
+    run_blocking(move || restore_backup(&paths, Path::new(&backup_dir), Path::new(&destination)))
+        .await
 }
 
 #[tauri::command]
-fn export_vault_files(vault_id: VaultId, destination: String) -> Result<usize, ErrorEnvelope> {
+async fn export_vault_files(
+    vault_id: VaultId,
+    destination: String,
+) -> Result<usize, ErrorEnvelope> {
     let paths = resolve_paths()?;
-    export_vault(&paths, &vault_id, Path::new(&destination)).map_err(|err| err.into_envelope(None))
+    run_blocking(move || export_vault(&paths, &vault_id, Path::new(&destination))).await
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .manage(DesktopRuntimeState::default())
         .invoke_handler(tauri::generate_handler![
             app_health,
             list_vaults,
@@ -255,6 +425,9 @@ pub fn run() {
             trash_note,
             restore_trashed_note,
             restore_revision,
+            set_pinned,
+            list_revisions,
+            list_trashed_notes,
             search_vault_notes,
             get_note_backlinks,
             get_vault_broken_links,
@@ -264,6 +437,12 @@ pub fn run() {
             restore_vault_backup,
             export_vault_files
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Personal Brain desktop application");
+        .build(tauri::generate_context!())
+        .expect("error while building Personal Brain desktop application");
+
+    app.run(|app_handle, event| {
+        if let tauri::RunEvent::Exit = event {
+            app_handle.state::<DesktopRuntimeState>().stop_watcher();
+        }
+    });
 }

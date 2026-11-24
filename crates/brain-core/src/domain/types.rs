@@ -299,3 +299,31 @@ pub struct GraphSnapshotDto {
     pub nodes: Vec<GraphNodeDto>,
     pub edges: Vec<GraphEdgeDto>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevisionSummaryDto {
+    pub revision_id: RevisionId,
+    pub operation_id: OperationId,
+    pub note_id: NoteId,
+    pub old_path: Option<String>,
+    pub new_path: Option<String>,
+    pub actor_key: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrashedNoteSummary {
+    pub note_id: NoteId,
+    pub rel_path: String,
+    pub last_hash: Option<String>,
+    pub last_seen_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WatcherEventDto {
+    pub vault_id: VaultId,
+    pub index_generation: u64,
+    pub indexed_notes: usize,
+    pub removed_notes: usize,
+    pub from_overflow: bool,
+}

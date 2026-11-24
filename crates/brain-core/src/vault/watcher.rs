@@ -1,6 +1,6 @@
 use crate::domain::errors::CoreError;
 use crate::domain::ids::VaultId;
-use crate::domain::types::ReconcileSummary;
+use crate::domain::types::{ReconcileSummary, WatcherEventDto};
 use crate::paths::AppPathsSpec;
 use crate::vault::engine::VaultEngine;
 use crate::vault::paths::{is_excluded_entry, path_key};
@@ -11,6 +11,8 @@ use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+pub type ReconcileCallback = Arc<dyn Fn(WatcherEventDto) + Send + Sync>;
 
 #[derive(Debug, Clone)]
 pub struct WatcherStats {
@@ -25,8 +27,8 @@ enum ControlMsg {
     Stop,
 }
 
-/// Debounced native Windows filesystem watcher with self-write suppression and overflow
-/// fallback to full vault reconciliation (`PB-013`).
+/// Debounced native Windows filesystem watcher with self-write suppression, overflow
+/// fallback to full vault reconciliation, and optional UI event callback (`PB-013`, Phase 4 §4.2).
 pub struct VaultWatcher {
     _watcher: RecommendedWatcher,
     tx: Sender<ControlMsg>,
@@ -41,6 +43,16 @@ impl VaultWatcher {
         vault_id: VaultId,
         vault_root: PathBuf,
         debounce: Duration,
+    ) -> Result<Self, CoreError> {
+        Self::start_with_callback(paths, vault_id, vault_root, debounce, None)
+    }
+
+    pub fn start_with_callback(
+        paths: AppPathsSpec,
+        vault_id: VaultId,
+        vault_root: PathBuf,
+        debounce: Duration,
+        on_reconciled: Option<ReconcileCallback>,
     ) -> Result<Self, CoreError> {
         let (tx, rx) = mpsc::channel::<ControlMsg>();
         let event_tx = tx.clone();
@@ -80,7 +92,7 @@ impl VaultWatcher {
                 match rx.recv_timeout(wait) {
                     Ok(ControlMsg::Stop) => break,
                     Ok(ControlMsg::ForceReconcile) => {
-                        run_reconcile(&paths, &vault_id, &stats_bg, false);
+                        run_reconcile(&paths, &vault_id, &stats_bg, false, on_reconciled.as_ref());
                         dirty = false;
                     }
                     Ok(ControlMsg::FsEvent(Ok(ev))) => {
@@ -90,13 +102,18 @@ impl VaultWatcher {
                         }
                     }
                     Ok(ControlMsg::FsEvent(Err(_))) => {
-                        // Overflow / watcher gap: force full reconcile.
-                        run_reconcile(&paths, &vault_id, &stats_bg, true);
+                        run_reconcile(&paths, &vault_id, &stats_bg, true, on_reconciled.as_ref());
                         dirty = false;
                     }
                     Err(RecvTimeoutError::Timeout) => {
                         if dirty && last_event_at.elapsed() >= debounce {
-                            run_reconcile(&paths, &vault_id, &stats_bg, false);
+                            run_reconcile(
+                                &paths,
+                                &vault_id,
+                                &stats_bg,
+                                false,
+                                on_reconciled.as_ref(),
+                            );
                             dirty = false;
                         }
                     }
@@ -156,6 +173,11 @@ impl Drop for VaultWatcher {
     }
 }
 
+fn strip_extended_prefix(p: &Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    PathBuf::from(s.strip_prefix("\\\\?\\").unwrap_or(&s))
+}
+
 fn should_trigger_reconcile(
     vault_root: &Path,
     ev: &Event,
@@ -167,8 +189,10 @@ fn should_trigger_reconcile(
     if ev.paths.is_empty() {
         return true;
     }
+    let clean_root = strip_extended_prefix(vault_root);
     for abs in &ev.paths {
-        let Ok(rel) = abs.strip_prefix(vault_root) else {
+        let clean_abs = strip_extended_prefix(abs);
+        let Ok(rel) = clean_abs.strip_prefix(&clean_root) else {
             return true;
         };
         let rel_str = rel.to_string_lossy().replace('\\', "/");
@@ -203,15 +227,25 @@ fn run_reconcile(
     vault_id: &VaultId,
     stats: &Arc<Mutex<WatcherStats>>,
     from_overflow: bool,
+    on_reconciled: Option<&ReconcileCallback>,
 ) {
     let summary: Result<ReconcileSummary, CoreError> = VaultEngine::rebuild_index(paths, vault_id);
     if let Ok(mut guard) = stats.lock() {
         if from_overflow {
             guard.missed_or_overflow_events += 1;
         }
-        if let Ok(s) = summary {
+        if let Ok(ref s) = summary {
             guard.reconcile_runs += 1;
             guard.last_generation = s.index_generation;
         }
+    }
+    if let (Ok(s), Some(cb)) = (summary, on_reconciled) {
+        cb(WatcherEventDto {
+            vault_id: vault_id.clone(),
+            index_generation: s.index_generation,
+            indexed_notes: s.indexed_notes,
+            removed_notes: s.removed_notes,
+            from_overflow,
+        });
     }
 }

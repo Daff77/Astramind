@@ -3,12 +3,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import * as ipc from "../lib/ipc";
 
-describe("App foundation shell", () => {
+describe("App desktop shell & IPC error boundaries", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    window.localStorage.clear();
+    window.sessionStorage.clear();
   });
 
-  it("renders live core health and vault registry count from typed IPC", async () => {
+  it("renders onboarding when no vault is open and keeps future modules explicitly disabled", async () => {
     vi.spyOn(ipc, "fetchAppHealth").mockResolvedValue({
       app_name: "Personal Brain",
       core_version: "0.1.0",
@@ -28,17 +30,25 @@ describe("App foundation shell", () => {
     vi.spyOn(ipc, "listVaults").mockResolvedValue([]);
 
     render(<App />);
-    expect(screen.getByText(/Checking Rust knowledge core/i)).toBeInTheDocument();
 
     await waitFor(() => {
       expect(
-        screen.getByText(/Knowledge core online \(windows-x86_64\)/i),
+        screen.getByRole("heading", { name: /Open or create a local Markdown vault/i }),
       ).toBeInTheDocument();
     });
-    expect(screen.getByText(/3\.49\.1 \(FTS5 enabled\)/i)).toBeInTheDocument();
+
+    expect(
+      screen.getByRole("button", { name: /Universe \(Unavailable in Phase 4\)/i }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: /AI Brain \(Unavailable in Phase 4\)/i }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: /Memory \(Unavailable in Phase 4\)/i }),
+    ).toBeDisabled();
   });
 
-  it("renders structured ErrorEnvelope and rejects unknown ErrorCodes", async () => {
+  it("surfaces structured ErrorEnvelope and rejects unknown ErrorCodes", async () => {
     vi.spyOn(ipc, "fetchAppHealth").mockRejectedValue({
       code: "STATE_UNAVAILABLE",
       message: "database offline",
@@ -49,12 +59,12 @@ describe("App foundation shell", () => {
     vi.spyOn(ipc, "listVaults").mockResolvedValue([]);
 
     render(<App />);
+
     await waitFor(() => {
       expect(
-        screen.getByText(/STATE_UNAVAILABLE.*database offline/i),
-      ).toBeInTheDocument();
+        screen.getAllByText(/STATE_UNAVAILABLE.*database offline/i).length,
+      ).toBeGreaterThan(0);
     });
-    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
 
     expect(ipc.parseErrorCode("CONFLICT")).toBe("CONFLICT");
     expect(ipc.parseErrorCode("UNKNOWN_FAKE_CODE")).toBe("IO_FAILED");

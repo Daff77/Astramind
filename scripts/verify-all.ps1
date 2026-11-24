@@ -17,11 +17,11 @@ function Invoke-Checked {
     }
 }
 
-Invoke-Checked "Frontend lint" { npm run lint }
-Invoke-Checked "Frontend typecheck" { npm run typecheck }
-Invoke-Checked "Frontend tests" { npm run test }
-Invoke-Checked "Rust fmt check" { cargo fmt --all -- --check }
-Invoke-Checked "Rust clippy" { cargo clippy --workspace --all-targets -- -D warnings }
-Invoke-Checked "Rust workspace tests" { cargo test --workspace --locked }
+Invoke-Checked "Frontend lint (ESLint)" { npm run lint }
+Invoke-Checked "Frontend typecheck (tsc --noEmit)" { npm run typecheck }
+Invoke-Checked "Frontend unit & component tests (Vitest)" { npm run test }
+Invoke-Checked "Rust formatting check (cargo fmt)" { cargo fmt --all -- --check }
+Invoke-Checked "Rust linter (cargo clippy -D warnings)" { cargo clippy --workspace --all-targets -- -D warnings }
+Invoke-Checked "Rust workspace & Windows integration tests (cargo test --locked)" { cargo test --workspace --locked }
 
-Write-Host "ALL_PHASE_2_CHECKS_PASSED"
+Write-Host "ALL_QUALITY_GATES_PASSED"

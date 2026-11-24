@@ -217,3 +217,77 @@ export interface RestoreResult {
   restored_files_count: number;
   grants_disabled: number;
 }
+
+export interface RevisionSummaryDto {
+  revision_id: string;
+  operation_id: string;
+  note_id: string;
+  old_path: string | null;
+  new_path: string | null;
+  actor_key: string;
+  created_at: string;
+}
+
+export interface TrashedNoteSummary {
+  note_id: string;
+  rel_path: string;
+  last_hash: string | null;
+  last_seen_at: string;
+}
+
+export interface WatcherEventDto {
+  vault_id: string;
+  index_generation: number;
+  indexed_notes: number;
+  removed_notes: number;
+  from_overflow: boolean;
+}
+
+export type NavSection = "home" | "knowledge" | "settings";
+
+export type ThemePreference = "system" | "light" | "dark";
+
+export type EditorViewMode = "edit" | "split" | "preview";
+
+export type SaveLifecycleState = "saved" | "dirty" | "saving" | "conflict" | "error";
+
+export interface ConflictState {
+  kind: "modified" | "deleted";
+  noteId: string;
+  relPath: string;
+  localBody: string;
+  localBaseHash: string;
+  externalBody: string | null;
+  externalHash: string | null;
+  message: string;
+}
+
+export interface EditorTabState {
+  noteId: string;
+  relPath: string;
+  title: string;
+  savedBody: string;
+  draftBody: string;
+  baseHash: string;
+  parseStatus: ParseStatus;
+  origin: NoteOrigin;
+  verification: VerificationStatus;
+  pinned: boolean;
+  tags: string[];
+  aliases: string[];
+  indexGeneration: number;
+  dirty: boolean;
+  saveState: SaveLifecycleState;
+  lastSavedAt: string | null;
+  conflict: ConflictState | null;
+  externalUpdateNotice: string | null;
+}
+
+export interface DraftSnapshot {
+  vaultId: string;
+  noteId: string;
+  relPath: string;
+  draftBody: string;
+  baseHash: string;
+  updatedAt: string;
+}

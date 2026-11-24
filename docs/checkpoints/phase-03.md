@@ -5,7 +5,7 @@
 | Phase | Phase 3 — Knowledge Vault Engine (`PB-010`–`PB-014`) |
 | Date | 2026-11-24 |
 | Baseline | Approved Phase 2 (`bd656e5`) |
-| Status | `IN_REVIEW` — awaiting owner sign-off at Phase 3 quality gate |
+| Status | `APPROVED WITH CHANGES` — Phase 3 approved with remediation items tracked in Phase 4 |
 
 ---
 
@@ -185,4 +185,4 @@ Hardware (`D-09` baseline): Intel Core i7-13620H, `15.7` GB RAM, NVIDIA GeForce 
 
 | Role | Decision (`Approve` \| `Approve with changes` \| `Reject`) | Date | Notes |
 |---|---|---|---|
-| Product owner | | | |
+| Product owner | Approve with changes | 2026-11-24 | Phase 3 approved with remediation items tracked in Phase 4 |

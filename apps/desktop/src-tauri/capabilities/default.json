@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Minimal least-privilege capability for Personal Brain main window",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "dialog:allow-open"]
 }

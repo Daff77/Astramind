@@ -1666,6 +1666,124 @@ impl VaultEngine {
         Ok(())
     }
 
+    pub fn set_pinned(
+        paths: &AppPathsSpec,
+        vault_id: &VaultId,
+        note_id: &NoteId,
+        pinned: bool,
+    ) -> Result<bool, CoreError> {
+        let registry = RegistryStore::open(paths)?;
+        let _ = registry.get_vault(vault_id)?;
+        let _lock = VaultLock::acquire(&paths.vault_lock_file(vault_id), DEFAULT_LOCK_TIMEOUT)?;
+        let state = VaultStateStore::open_or_init(paths, vault_id)?;
+        let exists = state
+            .get_note_by_id(note_id)?
+            .filter(|r| r.state == "present")
+            .is_some();
+        if !exists {
+            return Err(CoreError::NoteNotFound("note not found".to_string()));
+        }
+        state
+            .conn()
+            .execute(
+                "INSERT INTO note_status(note_id, origin, verification, pinned) VALUES (?1, 'imported', 'unverified', ?2)
+                 ON CONFLICT(note_id) DO UPDATE SET pinned = excluded.pinned",
+                params![note_id.as_str(), i32::from(pinned)],
+            )
+            .map_err(|err| CoreError::StateUnavailable(format!("update pinned status: {err}")))?;
+        Ok(pinned)
+    }
+
+    pub fn list_revisions(
+        paths: &AppPathsSpec,
+        vault_id: &VaultId,
+        note_id: &NoteId,
+    ) -> Result<Vec<crate::domain::types::RevisionSummaryDto>, CoreError> {
+        let registry = RegistryStore::open(paths)?;
+        let _ = registry.get_vault(vault_id)?;
+        let state = VaultStateStore::open_or_init(paths, vault_id)?;
+        let mut stmt = state
+            .conn()
+            .prepare(
+                "SELECT revision_id, operation_id, note_id, old_path, new_path, actor_key, created_at
+                 FROM revisions WHERE note_id = ?1 ORDER BY created_at DESC LIMIT 50",
+            )
+            .map_err(|err| CoreError::StateUnavailable(format!("prepare list_revisions: {err}")))?;
+        let rows = stmt
+            .query_map(params![note_id.as_str()], |r| {
+                let rev_s: String = r.get(0)?;
+                let op_s: String = r.get(1)?;
+                let nid_s: String = r.get(2)?;
+                Ok(crate::domain::types::RevisionSummaryDto {
+                    revision_id: RevisionId::parse(&rev_s).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?,
+                    operation_id: OperationId::parse(&op_s).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            1,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?,
+                    note_id: NoteId::parse(&nid_s).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?,
+                    old_path: r.get(3)?,
+                    new_path: r.get(4)?,
+                    actor_key: r.get(5)?,
+                    created_at: r.get(6)?,
+                })
+            })
+            .map_err(|err| CoreError::StateUnavailable(format!("query list_revisions: {err}")))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| CoreError::StateUnavailable(format!("collect list_revisions: {err}")))?;
+        Ok(rows)
+    }
+
+    pub fn list_trashed_notes(
+        paths: &AppPathsSpec,
+        vault_id: &VaultId,
+    ) -> Result<Vec<crate::domain::types::TrashedNoteSummary>, CoreError> {
+        let registry = RegistryStore::open(paths)?;
+        let _ = registry.get_vault(vault_id)?;
+        let state = VaultStateStore::open_or_init(paths, vault_id)?;
+        let mut stmt = state
+            .conn()
+            .prepare(
+                "SELECT note_id, rel_path, last_hash, last_seen_at
+                 FROM note_identity WHERE state = 'trashed' ORDER BY last_seen_at DESC",
+            )
+            .map_err(|err| CoreError::StateUnavailable(format!("prepare list_trashed: {err}")))?;
+        let rows = stmt
+            .query_map([], |r| {
+                let nid_s: String = r.get(0)?;
+                Ok(crate::domain::types::TrashedNoteSummary {
+                    note_id: NoteId::parse(&nid_s).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?,
+                    rel_path: r.get(1)?,
+                    last_hash: r.get(2)?,
+                    last_seen_at: r.get(3)?,
+                })
+            })
+            .map_err(|err| CoreError::StateUnavailable(format!("query list_trashed: {err}")))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| CoreError::StateUnavailable(format!("collect list_trashed: {err}")))?;
+        Ok(rows)
+    }
+
     pub fn lookup_note_id_by_path(
         paths: &AppPathsSpec,
         vault_id: &VaultId,
