@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Minimal least-privilege capability for Personal Brain main window",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

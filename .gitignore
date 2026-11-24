@@ -3,6 +3,7 @@ node_modules/
 target/
 dist/
 apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/
 
 # SQLite databases, WAL/SHM & generated test data
 *.sqlite

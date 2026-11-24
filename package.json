@@ -1,0 +1,16 @@
+{
+  "name": "personal-brain-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/desktop"
+  ],
+  "scripts": {
+    "lint": "npm --workspace @personal-brain/desktop run lint",
+    "typecheck": "npm --workspace @personal-brain/desktop run typecheck",
+    "test": "npm --workspace @personal-brain/desktop run test",
+    "build": "npm --workspace @personal-brain/desktop run build",
+    "desktop:dev": "npm --workspace @personal-brain/desktop run tauri dev",
+    "desktop:build": "npm --workspace @personal-brain/desktop run tauri build"
+  }
+}
