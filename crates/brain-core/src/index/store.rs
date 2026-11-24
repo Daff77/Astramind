@@ -12,7 +12,7 @@ use crate::state::utc_now_rfc3339;
 use crate::state::vault_state::VaultStateStore;
 use crate::vault::lock::VaultLock;
 use crate::vault::paths::path_key;
-use crate::vault::scan::{scan_vault, ScannedNote, VaultScanResult};
+use crate::vault::scan::{scan_vault_with_exclusions, ScannedNote, VaultScanResult};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -279,7 +279,8 @@ pub fn rebuild_generation_index(
     vault_root: &Path,
     state: &mut VaultStateStore,
 ) -> Result<(ReconcileSummary, usize, usize, usize), CoreError> {
-    let scan = scan_vault(vault_root)?;
+    let exclusions = state.get_exclusion_patterns()?;
+    let scan = scan_vault_with_exclusions(vault_root, &exclusions)?;
     let attachments_count = scan.attachments.len();
     let reconciled = reconcile_state_identities(state, scan)?;
 

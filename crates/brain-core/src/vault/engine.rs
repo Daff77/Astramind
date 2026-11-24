@@ -1,8 +1,8 @@
 use crate::domain::errors::CoreError;
 use crate::domain::ids::{NoteId, OperationId, RevisionId, VaultId};
 use crate::domain::types::{
-    ActorContext, MovePlan, MutationResult, NoteOrigin, NoteSnapshot, NoteSummary,
-    ReconcileSummary, VaultOpenReport, VaultSummary,
+    ActorContext, ExclusionPreviewDto, MovePlan, MutationResult, NoteOrigin, NoteSnapshot,
+    NoteSummary, ReconcileSummary, VaultOpenReport, VaultSummary,
 };
 use crate::index::store::{
     incremental_sync_note, open_healthy_index_or_rebuild, rebuild_generation_index,
@@ -16,10 +16,11 @@ use crate::state::utc_now_rfc3339;
 use crate::state::vault_state::VaultStateStore;
 use crate::vault::lock::VaultLock;
 use crate::vault::paths::{
-    file_identity_from_handle, path_key, resolve_guarded_existing_file,
-    resolve_guarded_target_for_write, validate_vault_root,
+    file_identity_from_handle, matches_exclusion_pattern, normalize_exclusion_patterns, path_key,
+    resolve_guarded_existing_file, resolve_guarded_target_for_write, validate_vault_root,
 };
 use crate::vault::replace::{safe_replace_note, sha256_hex, ReplacePrimitive};
+use crate::vault::scan::scan_vault;
 use rusqlite::{params, OptionalExtension};
 use std::io::Read;
 use std::path::Path;
@@ -1863,5 +1864,81 @@ impl VaultEngine {
         let _lock = VaultLock::acquire(&paths.vault_lock_file(vault_id), DEFAULT_LOCK_TIMEOUT)?;
         let state = VaultStateStore::open_or_init(paths, vault_id)?;
         state.clear_draft(note_id, max_draft_seq)
+    }
+
+    pub fn get_vault_exclusions(
+        paths: &AppPathsSpec,
+        vault_id: &VaultId,
+    ) -> Result<Vec<String>, CoreError> {
+        let registry = RegistryStore::open(paths)?;
+        let _ = registry.get_vault(vault_id)?;
+        let state = VaultStateStore::open_or_init(paths, vault_id)?;
+        state.get_exclusion_patterns()
+    }
+
+    /// Read-only preview of how candidate exclusion patterns affect the vault's Markdown corpus.
+    /// Never modifies disk files or database state.
+    pub fn preview_vault_exclusions(
+        paths: &AppPathsSpec,
+        vault_id: &VaultId,
+        patterns: &[String],
+    ) -> Result<ExclusionPreviewDto, CoreError> {
+        let registry = RegistryStore::open(paths)?;
+        let record = registry.get_vault(vault_id)?;
+        let vault_root = Path::new(&record.root_path);
+        let normalized = normalize_exclusion_patterns(patterns);
+        let scan = scan_vault(vault_root)?;
+
+        let mut excluded_paths = Vec::new();
+        let mut remaining_note_count = 0usize;
+        for note in scan.notes {
+            let entry_name = note.rel_path.rsplit('/').next().unwrap_or(&note.rel_path);
+            if matches_exclusion_pattern(&note.rel_path, entry_name, &normalized) {
+                excluded_paths.push(note.rel_path);
+            } else {
+                remaining_note_count += 1;
+            }
+        }
+        excluded_paths.sort();
+        let excluded_note_count = excluded_paths.len();
+        excluded_paths.truncate(50);
+
+        Ok(ExclusionPreviewDto {
+            patterns: normalized,
+            excluded_note_count,
+            remaining_note_count,
+            sample_excluded_paths: excluded_paths,
+        })
+    }
+
+    /// Persists vault indexing exclusion patterns in `state.sqlite` and rebuilds the derived index.
+    /// Never deletes or modifies source files on disk.
+    pub fn set_vault_exclusions(
+        paths: &AppPathsSpec,
+        actor: &ActorContext,
+        vault_id: &VaultId,
+        patterns: &[String],
+    ) -> Result<ReconcileSummary, CoreError> {
+        let registry = RegistryStore::open(paths)?;
+        let record = registry.get_vault(vault_id)?;
+        let vault_root = Path::new(&record.root_path);
+        let _lock = VaultLock::acquire(&paths.vault_lock_file(vault_id), DEFAULT_LOCK_TIMEOUT)?;
+        let mut state = VaultStateStore::open_or_init(paths, vault_id)?;
+        Self::recover_pending_journal(vault_root, &mut state)?;
+        let normalized = state.set_exclusion_patterns(patterns)?;
+        let (summary, _, _, _) = rebuild_generation_index(vault_id, vault_root, &mut state)?;
+        state.insert_audit_event(
+            "exclusions_updated",
+            &actor.actor_key(),
+            None,
+            None,
+            "committed",
+            &serde_json::json!({
+                "pattern_count": normalized.len(),
+                "indexed_notes": summary.indexed_notes,
+                "removed_notes": summary.removed_notes,
+            }),
+        )?;
+        Ok(summary)
     }
 }

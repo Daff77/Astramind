@@ -347,3 +347,11 @@ pub struct EditorDraftDto {
     pub body: String,
     pub updated_at: String,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExclusionPreviewDto {
+    pub patterns: Vec<String>,
+    pub excluded_note_count: usize,
+    pub remaining_note_count: usize,
+    pub sample_excluded_paths: Vec<String>,
+}

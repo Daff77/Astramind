@@ -2,6 +2,7 @@ import { useState } from "react";
 import {
   Archive,
   FolderPlus,
+  FolderX,
   HardDriveDownload,
   RefreshCw,
   RotateCcw,
@@ -11,6 +12,7 @@ import type {
   AppHealthDto,
   BackupResult,
   EditorViewMode,
+  ExclusionPreviewDto,
   ReconcileSummary,
   RestoreResult,
   ThemePreference,
@@ -18,6 +20,7 @@ import type {
   VaultSummary,
 } from "../../lib/contracts";
 import { pickDirectoryDialog } from "../../lib/ipc";
+import { ExclusionsModal } from "../universe/ExclusionsModal";
 
 interface SettingsViewProps {
   activeVault: VaultSummary | null;
@@ -42,6 +45,9 @@ interface SettingsViewProps {
   ) => Promise<RestoreResult>;
   onRestoreTrashed: (noteId: string) => Promise<void>;
   onRefreshTrash: () => Promise<void>;
+  onGetExclusions?: () => Promise<string[]>;
+  onPreviewExclusions?: (patterns: string[]) => Promise<ExclusionPreviewDto>;
+  onApplyExclusions?: (patterns: string[]) => Promise<ReconcileSummary>;
 }
 
 export function SettingsView({
@@ -64,6 +70,9 @@ export function SettingsView({
   onRestoreBackup,
   onRestoreTrashed,
   onRefreshTrash,
+  onGetExclusions,
+  onPreviewExclusions,
+  onApplyExclusions,
 }: SettingsViewProps) {
   const [exportDest, setExportDest] = useState("");
   const [backupDest, setBackupDest] = useState("");
@@ -73,6 +82,8 @@ export function SettingsView({
     "rebuild" | "backup-restore" | null
   >(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [exclusionsOpen, setExclusionsOpen] = useState(false);
+  const [exclusionPatterns, setExclusionPatterns] = useState<string[]>([]);
 
   async function pickInto(setter: (val: string) => void, title: string) {
     const selected = await pickDirectoryDialog(title);
@@ -231,6 +242,35 @@ export function SettingsView({
                 </button>
               )}
             </section>
+
+            {onGetExclusions && onPreviewExclusions && onApplyExclusions ? (
+              <section className="pb-surface-card" aria-label="Indexing exclusions">
+                <h2>Indexing &amp; Graph Exclusions</h2>
+                <p style={{ margin: 0, color: "var(--text-secondary)" }}>
+                  Exclude dependency folders (<code>node_modules</code>,{" "}
+                  <code>target</code>, <code>dist</code>), build outputs, or
+                  generated documentation from the derived search and Universe
+                  index without modifying files on disk.
+                </p>
+                <div>
+                  <button
+                    type="button"
+                    className="pb-btn"
+                    disabled={isBusy}
+                    onClick={async () => {
+                      try {
+                        setExclusionPatterns(await onGetExclusions());
+                      } catch {
+                        setExclusionPatterns([]);
+                      }
+                      setExclusionsOpen(true);
+                    }}
+                  >
+                    <FolderX size={14} /> Manage Index Exclusions…
+                  </button>
+                </div>
+              </section>
+            ) : null}
 
             <section className="pb-surface-card" aria-label="Markdown export and backup">
               <h2>Export &amp; Complete Backup</h2>
@@ -495,6 +535,25 @@ export function SettingsView({
           </section>
         ) : null}
       </div>
+
+      {exclusionsOpen &&
+      activeVault &&
+      onPreviewExclusions &&
+      onApplyExclusions ? (
+        <ExclusionsModal
+          vaultName={activeVault.display_name}
+          initialPatterns={exclusionPatterns}
+          onPreview={onPreviewExclusions}
+          onApply={async (patterns) => {
+            const summary = await onApplyExclusions(patterns);
+            setStatusMessage(
+              `Exclusions applied; index rebuilt to generation #${summary.index_generation} (${summary.indexed_notes} indexed).`,
+            );
+            return summary;
+          }}
+          onClose={() => setExclusionsOpen(false)}
+        />
+      ) : null}
     </section>
   );
 }

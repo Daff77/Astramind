@@ -3,14 +3,15 @@ use brain_core::domain::errors::{CoreError, ErrorEnvelope};
 use brain_core::domain::ids::{NoteId, RevisionId, VaultId};
 use brain_core::domain::types::{
     ActorContext, AppHealthDto, BacklinkHit, BackupResult, BrokenLinkDto, EditorDraftDto,
-    GraphSnapshotDto, MovePlan, MutationResult, NoteSnapshot, NoteSummary, Page, ReconcileSummary,
-    RestoreResult, RevisionSummaryDto, SearchFilters, SearchHit, TrashedNoteSummary,
-    VaultOpenReport, VaultSummary,
+    ExclusionPreviewDto, GraphSnapshotDto, MovePlan, MutationResult, NoteSnapshot, NoteSummary,
+    Page, ReconcileSummary, RestoreResult, RevisionSummaryDto, SearchFilters, SearchHit,
+    TrashedNoteSummary, VaultOpenReport, VaultSummary,
 };
 use brain_core::health_check;
 use brain_core::paths::AppPathsSpec;
 use brain_core::retrieval::{get_backlinks, get_broken_links, get_graph, search_notes};
 use brain_core::vault::engine::VaultEngine;
+use brain_core::vault::paths::normalize_exclusion_patterns;
 use brain_core::vault::watcher::VaultWatcher;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -94,6 +95,16 @@ impl DesktopRuntimeState {
             }
         }
         false
+    }
+
+    fn update_watcher_exclusions(&self, vault_id: &VaultId, patterns: Vec<String>) {
+        if let Ok(guard) = self.active_watcher.lock() {
+            if let Some((active_id, watcher)) = guard.as_ref() {
+                if active_id == vault_id {
+                    watcher.update_exclusions(patterns);
+                }
+            }
+        }
     }
 
     fn stop_watcher(&self) {
@@ -486,6 +497,44 @@ async fn trigger_reconcile(
     Ok(runtime.trigger_reconcile(&vault_id))
 }
 
+#[tauri::command]
+async fn get_vault_exclusions(vault_id: VaultId) -> Result<Vec<String>, ErrorEnvelope> {
+    let paths = resolve_paths()?;
+    run_blocking(move || VaultEngine::get_vault_exclusions(&paths, &vault_id)).await
+}
+
+#[tauri::command]
+async fn preview_vault_exclusions(
+    vault_id: VaultId,
+    patterns: Vec<String>,
+) -> Result<ExclusionPreviewDto, ErrorEnvelope> {
+    let paths = resolve_paths()?;
+    run_blocking(move || VaultEngine::preview_vault_exclusions(&paths, &vault_id, &patterns)).await
+}
+
+#[tauri::command]
+async fn set_vault_exclusions(
+    runtime: State<'_, DesktopRuntimeState>,
+    vault_id: VaultId,
+    patterns: Vec<String>,
+) -> Result<ReconcileSummary, ErrorEnvelope> {
+    let paths = resolve_paths()?;
+    let normalized = normalize_exclusion_patterns(&patterns);
+    let vid_clone = vault_id.clone();
+    let patterns_clone = patterns.clone();
+    let summary = run_blocking(move || {
+        VaultEngine::set_vault_exclusions(
+            &paths,
+            &ActorContext::desktop("local-user"),
+            &vid_clone,
+            &patterns_clone,
+        )
+    })
+    .await?;
+    runtime.update_watcher_exclusions(&vault_id, normalized);
+    Ok(summary)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -520,7 +569,10 @@ pub fn run() {
             get_draft,
             list_drafts,
             clear_draft,
-            trigger_reconcile
+            trigger_reconcile,
+            get_vault_exclusions,
+            preview_vault_exclusions,
+            set_vault_exclusions
         ])
         .build(tauri::generate_context!())
         .expect("error while building Personal Brain desktop application");

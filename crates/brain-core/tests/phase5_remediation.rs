@@ -1,3 +1,4 @@
+use brain_core::backup::create_backup;
 use brain_core::domain::errors::ErrorCode;
 use brain_core::domain::types::{ActorContext, SearchFilters, WatcherEventDto};
 use brain_core::paths::AppPathsSpec;
@@ -326,4 +327,77 @@ fn graph_snapshot_preserves_stable_ids_cycles_self_links_isolated_nodes_and_unic
     let graph_after_trash = get_graph(&paths, &vid).unwrap();
     assert_eq!(graph_after_trash.nodes.len(), 2);
     assert!(!graph_after_trash.nodes.iter().any(|n| n.id == iso.note_id));
+}
+
+#[test]
+fn persistent_exclusions_filter_index_preview_safely_and_preserve_files_and_backups() {
+    let tmp = ScratchDir::new("pb-phase5-exclusions");
+    let paths = test_paths(&tmp);
+    let root = tmp.path().join("vault");
+    std::fs::create_dir_all(root.join("notes")).unwrap();
+    std::fs::create_dir_all(root.join("node_modules/pkg-a")).unwrap();
+    std::fs::create_dir_all(root.join("target/doc")).unwrap();
+    std::fs::create_dir_all(root.join("vendor_docs")).unwrap();
+
+    std::fs::write(root.join("notes/idea.md"), "# Real Note\n\nCore idea.").unwrap();
+    std::fs::write(
+        root.join("node_modules/pkg-a/README.md"),
+        "# Package Readme\n\nDependency docs.",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("target/doc/crate.md"),
+        "# Target Docs\n\nGenerated build docs.",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("vendor_docs/guide.md"),
+        "# Vendor Guide\n\nThird-party guide.",
+    )
+    .unwrap();
+
+    // Default exclusions already skip node_modules and target during initial open/index.
+    let report = VaultEngine::open_vault(&paths, &root).unwrap();
+    let vid = report.vault.vault_id;
+    let initial_graph = get_graph(&paths, &vid).unwrap();
+    assert_eq!(initial_graph.nodes.len(), 2);
+    assert!(initial_graph
+        .nodes
+        .iter()
+        .any(|n| n.rel_path == "notes/idea.md"));
+    assert!(initial_graph
+        .nodes
+        .iter()
+        .any(|n| n.rel_path == "vendor_docs/guide.md"));
+
+    // Preview adding vendor_docs without modifying index or files on disk.
+    let patterns = vec![
+        "node_modules".to_string(),
+        "target".to_string(),
+        "vendor_docs".to_string(),
+    ];
+    let preview = VaultEngine::preview_vault_exclusions(&paths, &vid, &patterns).unwrap();
+    assert_eq!(preview.excluded_note_count, 3);
+    assert_eq!(preview.remaining_note_count, 1);
+    assert!(preview
+        .sample_excluded_paths
+        .contains(&"vendor_docs/guide.md".to_string()));
+    assert_eq!(get_graph(&paths, &vid).unwrap().nodes.len(), 2);
+
+    // Apply exclusions and verify index shrinks while source files and backups remain intact.
+    let actor = ActorContext::desktop("tester");
+    let summary = VaultEngine::set_vault_exclusions(&paths, &actor, &vid, &patterns).unwrap();
+    assert_eq!(summary.indexed_notes, 1);
+    let updated_graph = get_graph(&paths, &vid).unwrap();
+    assert_eq!(updated_graph.nodes.len(), 1);
+    assert_eq!(updated_graph.nodes[0].rel_path, "notes/idea.md");
+
+    // Source files on disk are never deleted.
+    assert!(root.join("node_modules/pkg-a/README.md").exists());
+    assert!(root.join("vendor_docs/guide.md").exists());
+
+    // Backup still preserves all vault files regardless of indexing exclusions.
+    let backup_dest = tmp.path().join("backup");
+    let backup = create_backup(&paths, &vid, &backup_dest).unwrap();
+    assert_eq!(backup.vault_files_count, 4);
 }

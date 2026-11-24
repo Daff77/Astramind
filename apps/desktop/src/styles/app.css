@@ -1090,16 +1090,20 @@
     border-bottom: 1px solid var(--border-hairline);
   }
   .pb-universe-body {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1fr) 260px;
+    flex-direction: column;
   }
-  .pb-universe-body .pb-pane-inspector {
+  .pb-universe-inspector {
+    width: 100% !important;
+    max-height: 44%;
     border-left: none;
     border-top: 1px solid var(--border-hairline);
   }
+  .pb-universe-resize-handle {
+    display: none;
+  }
 }
 
-/* Knowledge Universe (3D Galaxy + Accessible Fallback) */
+/* Knowledge Universe (3D Cosmos + Floating HUD + Accessible Fallback) */
 .pb-universe-shell {
   flex: 1;
   min-height: 0;
@@ -1109,7 +1113,7 @@
   background: var(--bg-canvas);
 }
 
-.pb-universe-toolbar {
+.pb-universe-list-toolbar {
   min-height: 44px;
   padding: var(--space-2) var(--space-3);
   background: var(--bg-surface);
@@ -1132,13 +1136,14 @@
 .pb-universe-body {
   flex: 1;
   min-height: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 296px;
+  display: flex;
   overflow: hidden;
+  position: relative;
 }
 
 .pb-universe-stage {
   position: relative;
+  flex: 1;
   min-width: 0;
   min-height: 0;
   display: flex;
@@ -1153,36 +1158,266 @@
   overflow: hidden;
 }
 
+.pb-universe-canvas-wrap.is-dark {
+  background: radial-gradient(
+    ellipse at 52% 46%,
+    #0e172a 0%,
+    #070b16 58%,
+    #03050a 100%
+  );
+}
+
+.pb-universe-canvas-wrap.is-light {
+  background: radial-gradient(
+    ellipse at 50% 45%,
+    #f7f9fc 0%,
+    #edf1f8 60%,
+    #e2e8f2 100%
+  );
+}
+
+/* Floating Universe HUD Pills */
+.pb-universe-float-tl,
+.pb-universe-float-tr,
+.pb-universe-float-bl,
+.pb-universe-inspector-chip {
+  position: absolute;
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: var(--radius-md);
+  border: 1px solid color-mix(in srgb, var(--border-strong) 70%, transparent);
+  background: color-mix(in srgb, var(--bg-surface) 84%, transparent);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.22);
+}
+
+.pb-universe-float-tl {
+  top: 12px;
+  left: 12px;
+  max-width: calc(100% - 24px);
+  flex-wrap: wrap;
+}
+
+.pb-universe-float-tr {
+  top: 12px;
+  right: 12px;
+  flex-wrap: wrap;
+}
+
+.pb-universe-float-bl {
+  bottom: 12px;
+  left: 12px;
+}
+
+.pb-universe-inspector-chip {
+  bottom: 12px;
+  right: 12px;
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+
+.pb-universe-inspector-chip:hover {
+  background: var(--bg-elevated);
+  border-color: var(--accent-primary);
+}
+
+.pb-universe-search-input {
+  width: 172px;
+  height: 26px;
+  font-size: 12px;
+}
+
+.pb-universe-compact-select {
+  width: auto;
+  min-width: 106px;
+  max-width: 142px;
+  height: 26px;
+  font-size: 12px;
+}
+
+.pb-universe-telemetry {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.pb-universe-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 264px;
+  padding: 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-modal);
+  z-index: 30;
+  display: grid;
+  gap: 10px;
+}
+
+.pb-universe-popover-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12.5px;
+}
+
+.pb-universe-setting-row {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.pb-universe-setting-row input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent-primary);
+}
+
+.pb-universe-setting-inline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.pb-universe-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.pb-universe-edge-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.pb-legend-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.pb-legend-dot.is-in {
+  background: #f59e0b;
+}
+
+.pb-legend-dot.is-out {
+  background: #38bdf8;
+}
+
+/* Collapsible & Resizable Contextual Star Inspector */
+.pb-universe-inspector {
+  position: relative;
+  flex-shrink: 0;
+  min-width: 260px;
+  max-width: 440px;
+}
+
+.pb-universe-resize-handle {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 5px;
+  cursor: col-resize;
+  z-index: 15;
+}
+
+.pb-universe-resize-handle:hover {
+  background: color-mix(in srgb, var(--accent-primary) 35%, transparent);
+}
+
+/* Semantic Labels */
 .pb-universe-labels {
   position: absolute;
   inset: 0;
   pointer-events: none;
   overflow: hidden;
+  z-index: 6;
 }
 
 .pb-universe-label {
   position: absolute;
   top: 0;
   left: 0;
-  padding: 1px 6px;
-  border-radius: 3px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  border-radius: var(--radius-sm);
   font-size: 11px;
   font-weight: 500;
+  line-height: 1.3;
   white-space: nowrap;
-  max-width: 160px;
+  max-width: 176px;
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--bg-surface) 78%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border-hairline) 80%, transparent);
+  will-change: transform;
+}
+
+.pb-universe-label-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.pb-universe-label-text {
   overflow: hidden;
   text-overflow: ellipsis;
-  color: var(--text-primary);
-  background: color-mix(in srgb, var(--bg-surface) 84%, transparent);
-  border: 1px solid var(--border-hairline);
-  margin-top: 8px;
-  margin-left: 8px;
+}
+
+.pb-universe-label-count {
+  font-size: 10px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.pb-universe-label.is-cluster {
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  border-radius: 999px;
+  padding: 2px 9px;
+  background: color-mix(in srgb, var(--bg-elevated) 84%, transparent);
 }
 
 .pb-universe-label.is-selected {
   border-color: var(--accent-primary);
   background: var(--bg-elevated);
   font-weight: 600;
+  z-index: 4;
+}
+
+.pb-universe-label.is-hovered {
+  border-color: var(--border-strong);
+  background: var(--bg-elevated);
+  z-index: 3;
+}
+
+.pb-universe-label.is-matched {
+  border-color: var(--accent-primary);
 }
 
 .pb-universe-list {

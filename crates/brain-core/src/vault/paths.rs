@@ -19,6 +19,130 @@ pub fn is_cloud_placeholder_attrs(attrs: u32) -> bool {
     (attrs & (WIN_ATTR_OFFLINE | WIN_ATTR_RECALL_ON_OPEN | WIN_ATTR_RECALL_ON_DATA_ACCESS)) != 0
 }
 
+pub const DEFAULT_EXCLUSION_PATTERNS: &[&str] = &[
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".next",
+    ".nuxt",
+    ".cache",
+    ".turbo",
+    ".vite",
+    ".parcel-cache",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "coverage",
+];
+
+const MAX_EXCLUSION_PATTERNS: usize = 100;
+
+#[must_use]
+pub fn default_exclusion_patterns() -> Vec<String> {
+    DEFAULT_EXCLUSION_PATTERNS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
+/// Normalizes user-provided exclusion patterns: trims whitespace, normalizes separators,
+/// strips leading/trailing `/`, rejects traversal (`..`) or empty entries, deduplicates case-insensitively,
+/// and caps at 100 patterns.
+#[must_use]
+pub fn normalize_exclusion_patterns(raw: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for item in raw {
+        if out.len() >= MAX_EXCLUSION_PATTERNS {
+            break;
+        }
+        let cleaned = item.trim().replace('\\', "/").trim_matches('/').to_string();
+        if cleaned.is_empty() || cleaned.contains(':') {
+            continue;
+        }
+        if cleaned
+            .split('/')
+            .any(|seg| seg.is_empty() || seg == "." || seg == "..")
+        {
+            continue;
+        }
+        let key = cleaned.to_ascii_lowercase();
+        if seen.insert(key.clone()) {
+            out.push(key);
+        }
+    }
+    out
+}
+
+fn wildcard_match_ci(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let (mut star_p, mut star_t) = (None::<usize>, 0usize);
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star_p = Some(pi);
+            star_t = ti;
+            pi += 1;
+        } else if let Some(sp) = star_p {
+            pi = sp + 1;
+            star_t += 1;
+            ti = star_t;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+/// Matches a vault-relative path (`/`-separated) or single directory/file entry name against
+/// normalized exclusion patterns (single-segment names, wildcards like `*.generated.md`, or
+/// multi-segment path prefixes like `docs/generated` or `packages/*/dist`).
+#[must_use]
+pub fn matches_exclusion_pattern(rel_path: &str, entry_name: &str, patterns: &[String]) -> bool {
+    let rel_lower = rel_path.trim_matches('/').to_ascii_lowercase();
+    let entry_lower = entry_name.to_ascii_lowercase();
+    let segments: Vec<&str> = rel_lower.split('/').collect();
+
+    for raw_pat in patterns {
+        let pat = raw_pat.trim().trim_matches('/').to_ascii_lowercase();
+        if pat.is_empty() {
+            continue;
+        }
+        if !pat.contains('/') {
+            if pat.contains('*') || pat.contains('?') {
+                if wildcard_match_ci(&pat, &entry_lower)
+                    || segments.iter().any(|seg| wildcard_match_ci(&pat, seg))
+                {
+                    return true;
+                }
+            } else if entry_lower == pat || segments.iter().any(|seg| *seg == pat) {
+                return true;
+            }
+            continue;
+        }
+
+        let pat_segs: Vec<&str> = pat.split('/').collect();
+        if segments.len() >= pat_segs.len() {
+            let matched = pat_segs
+                .iter()
+                .zip(segments.iter())
+                .all(|(p, s)| wildcard_match_ci(p, s));
+            if matched {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[must_use]
 pub fn is_excluded_entry(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();

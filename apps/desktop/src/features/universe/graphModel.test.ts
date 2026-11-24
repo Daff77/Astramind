@@ -1,4 +1,6 @@
+import * as THREE from "three";
 import { describe, expect, it } from "vitest";
+import { computeVisibleLabels } from "./GalaxyCanvas";
 import {
   filterGraphModel,
   isStaleGraphSnapshot,
@@ -217,5 +219,100 @@ describe("graphModel normalization, filtering, and stale protection (PB-019)", (
       simActive.step();
     }
     expect(simActive.settled).toBe(true);
+    expect(simActive.clusterBounds).toHaveLength(2);
+    expect(simActive.boundingRadius).toBeGreaterThan(0);
+  });
+
+  it("extracts subcluster keys, filters isolated nodes accurately, and rejects overlapping labels", () => {
+    const folders = ["projects", "research", "architecture", "daily", "notes"];
+    const nodes = Array.from({ length: 40 }, (_, i) => {
+      const folder = folders[i % folders.length]!;
+      const isIso = i >= 12;
+      return {
+        id: `n-${i}`,
+        rel_path:
+          i % 3 === 0
+            ? `${folder}/sub-${i % 4}/doc-${i}.md`
+            : `${folder}/doc-${i}.md`,
+        title: `Star Node ${i}`,
+        folder,
+        tags: i % 2 === 0 ? ["core"] : [],
+        origin: "user_created" as const,
+        parse_status: "ok" as const,
+        verification: "unverified" as const,
+        incoming_count: isIso ? 0 : (i % 4) + 1,
+        outgoing_count: isIso ? 0 : 1,
+      };
+    });
+    const edges = Array.from({ length: 11 }, (_, i) => ({
+      source: `n-${i}`,
+      target: `n-${(i + 1) % 12}`,
+      kind: "wiki",
+      count: 1,
+    }));
+
+    const model = normalizeGraphSnapshot(
+      makeSnapshot({ nodes, edges }),
+      [],
+    );
+    expect(model.nodes[0]?.subclusterKey).toBe("sub-0");
+    expect(model.isolatedCount).toBe(28);
+
+    const connectedOnly = filterGraphModel(model, {
+      query: "",
+      folder: "",
+      tag: "",
+      hideIsolated: true,
+    });
+    expect(connectedOnly.nodes).toHaveLength(12);
+    expect(connectedOnly.totalNodes).toBe(40);
+    expect(connectedOnly.isFiltered).toBe(true);
+
+    const sim = createUniverseLayout(model.nodes, model.edges, undefined, true);
+    const cam = new THREE.PerspectiveCamera(46, 1280 / 720, 0.5, 4000);
+    cam.position.set(0, 60, 140);
+    cam.lookAt(0, 0, 0);
+    cam.updateMatrixWorld();
+
+    const overview = computeVisibleLabels({
+      nodes: model.nodes,
+      clusterBounds: sim.clusterBounds,
+      positions: sim.positions,
+      camera: cam,
+      width: 1280,
+      height: 720,
+      cameraDistance: 300,
+      boundingRadius: sim.boundingRadius,
+      selectedNodeId: null,
+      hoveredNodeId: null,
+      neighborIds: new Set(),
+      searchQuery: "",
+      labelDensity: "medium",
+      isDarkTheme: true,
+    });
+    expect(overview.zoomLevel).toBe(1);
+    expect(overview.labels.some((l) => l.kind === "cluster")).toBe(true);
+    expect(overview.labels.length).toBeLessThanOrEqual(22);
+
+    // Selected node elevates semantic zoom to Level 4 (Star Focus) and appears first.
+    const focused = computeVisibleLabels({
+      nodes: model.nodes,
+      clusterBounds: sim.clusterBounds,
+      positions: sim.positions,
+      camera: cam,
+      width: 1280,
+      height: 720,
+      cameraDistance: 45,
+      boundingRadius: sim.boundingRadius,
+      selectedNodeId: "n-0",
+      hoveredNodeId: null,
+      neighborIds: new Set(["n-1"]),
+      searchQuery: "",
+      labelDensity: "low",
+      isDarkTheme: true,
+    });
+    expect(focused.zoomLevel).toBe(4);
+    expect(focused.labels[0]?.id).toBe("n-0");
+    expect(focused.labels.length).toBeLessThanOrEqual(10);
   });
 });

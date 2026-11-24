@@ -261,6 +261,25 @@ export interface EditorDraftDto {
   updated_at: string;
 }
 
+export interface ExclusionPreviewDto {
+  patterns: string[];
+  excluded_note_count: number;
+  remaining_note_count: number;
+  sample_excluded_paths: string[];
+}
+
+export type LabelDensity = "low" | "medium" | "high";
+
+export interface UniverseSettings {
+  starSize: number;
+  connectionOpacity: number;
+  labelDensity: LabelDensity;
+  clusterSpacing: number;
+  showIsolated: boolean;
+  focusDepth: 1 | 2;
+  reducedEffects: boolean;
+}
+
 export type NavSection = "home" | "knowledge" | "universe" | "settings";
 
 export type ThemePreference = "system" | "light" | "dark";

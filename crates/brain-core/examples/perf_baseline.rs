@@ -65,7 +65,12 @@ fn populate_synthetic_vault(root: &Path, count: usize, edge_target: usize) {
             i % 10
         );
         if count > 1 {
-            for e in 0..edges_per_note {
+            let links_for_note = if edge_target < count {
+                usize::from(i < edge_target)
+            } else {
+                edges_per_note
+            };
+            for e in 0..links_for_note {
                 let target_idx = (i + 1 + rng.range(count - 1) + e) % count;
                 if target_idx != i {
                     let target_folder = folders[target_idx % folders.len()];
@@ -181,4 +186,5 @@ fn main() {
     bench_fixture("F0", 0, 0);
     bench_fixture("F100", 100, 250);
     bench_fixture("F1000", 1000, 2500);
+    bench_fixture("F2507", 2507, 173);
 }

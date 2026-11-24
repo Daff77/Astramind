@@ -5,7 +5,7 @@ use crate::index::publish_staged_file_exclusive;
 use crate::paths::AppPathsSpec;
 use crate::state::registry::{configure_durable_sqlite, verify_sqlite_integrity};
 use crate::state::utc_now_rfc3339;
-use crate::vault::paths::path_key;
+use crate::vault::paths::{default_exclusion_patterns, normalize_exclusion_patterns, path_key};
 use crate::vault::replace::sha256_hex;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::fs::OpenOptions;
@@ -733,6 +733,46 @@ impl VaultStateStore {
         }
         .map_err(|err| CoreError::StateUnavailable(format!("clear editor draft: {err}")))?;
         Ok(deleted > 0)
+    }
+
+    pub fn get_exclusion_patterns(&self) -> Result<Vec<String>, CoreError> {
+        let raw: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM vault_meta WHERE key = 'exclusion_patterns_json'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|err| {
+                CoreError::StateUnavailable(format!("read exclusion_patterns_json: {err}"))
+            })?;
+        match raw {
+            Some(json_str) => {
+                let parsed: Vec<String> = serde_json::from_str(&json_str).map_err(|err| {
+                    CoreError::RecoveryRequired(format!("invalid exclusion_patterns_json: {err}"))
+                })?;
+                Ok(normalize_exclusion_patterns(&parsed))
+            }
+            None => Ok(default_exclusion_patterns()),
+        }
+    }
+
+    pub fn set_exclusion_patterns(&self, patterns: &[String]) -> Result<Vec<String>, CoreError> {
+        let normalized = normalize_exclusion_patterns(patterns);
+        let serialized = serde_json::to_string(&normalized).map_err(|err| {
+            CoreError::StateUnavailable(format!("serialize exclusion_patterns_json: {err}"))
+        })?;
+        self.conn
+            .execute(
+                "INSERT INTO vault_meta(key, value) VALUES ('exclusion_patterns_json', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![serialized],
+            )
+            .map_err(|err| {
+                CoreError::StateUnavailable(format!("update exclusion_patterns_json: {err}"))
+            })?;
+        Ok(normalized)
     }
 }
 

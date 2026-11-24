@@ -2,8 +2,11 @@ use crate::domain::errors::{CoreError, ErrorCode};
 use crate::domain::ids::VaultId;
 use crate::domain::types::{ReconcileSummary, WatcherEventDto};
 use crate::paths::AppPathsSpec;
+use crate::state::vault_state::VaultStateStore;
 use crate::vault::engine::VaultEngine;
-use crate::vault::paths::{is_excluded_entry, path_key};
+use crate::vault::paths::{
+    default_exclusion_patterns, is_excluded_entry, matches_exclusion_pattern, path_key,
+};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -43,6 +46,7 @@ pub struct VaultWatcher {
     tx: Sender<ControlMsg>,
     worker: Option<JoinHandle<()>>,
     suppressed: Arc<Mutex<HashMap<String, (String, Instant)>>>,
+    exclusions: Arc<Mutex<Vec<String>>>,
     stats: Arc<Mutex<WatcherStats>>,
 }
 
@@ -98,6 +102,10 @@ impl VaultWatcher {
             .watch(&vault_root, RecursiveMode::Recursive)
             .map_err(|err| CoreError::IoFailed(format!("watch vault root: {err}")))?;
 
+        let initial_exclusions = VaultStateStore::open_or_init(&paths, &vault_id)
+            .and_then(|s| s.get_exclusion_patterns())
+            .unwrap_or_else(|_| default_exclusion_patterns());
+        let exclusions: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(initial_exclusions));
         let suppressed: Arc<Mutex<HashMap<String, (String, Instant)>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let stats = Arc::new(Mutex::new(WatcherStats {
@@ -110,6 +118,7 @@ impl VaultWatcher {
         }));
 
         let suppressed_bg = Arc::clone(&suppressed);
+        let exclusions_bg = Arc::clone(&exclusions);
         let stats_bg = Arc::clone(&stats);
         let root_bg = vault_root.clone();
 
@@ -160,7 +169,7 @@ impl VaultWatcher {
                         );
                     }
                     Ok(ControlMsg::FsEvent(Ok(ev))) => {
-                        if should_trigger_reconcile(&root_bg, &ev, &suppressed_bg) {
+                        if should_trigger_reconcile(&root_bg, &ev, &suppressed_bg, &exclusions_bg) {
                             state.dirty = true;
                             state.last_event_at = Instant::now();
                             // Clear exhausted stale retry counter when a fresh filesystem change arrives.
@@ -200,8 +209,15 @@ impl VaultWatcher {
             tx,
             worker: Some(worker),
             suppressed,
+            exclusions,
             stats,
         })
+    }
+
+    pub fn update_exclusions(&self, patterns: Vec<String>) {
+        if let Ok(mut guard) = self.exclusions.lock() {
+            *guard = patterns;
+        }
     }
 
     /// Suppresses immediate self-write feedback loops for `(rel_path, content_hash)` for 2 seconds.
@@ -285,6 +301,7 @@ fn should_trigger_reconcile(
     vault_root: &Path,
     ev: &Event,
     suppressed: &Arc<Mutex<HashMap<String, (String, Instant)>>>,
+    exclusions: &Arc<Mutex<Vec<String>>>,
 ) -> bool {
     if matches!(ev.kind, EventKind::Access(_)) {
         return false;
@@ -292,6 +309,10 @@ fn should_trigger_reconcile(
     if ev.paths.is_empty() {
         return true;
     }
+    let exclusion_snapshot = exclusions
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_else(|_| default_exclusion_patterns());
     let clean_root = strip_extended_prefix(vault_root);
     for abs in &ev.paths {
         let clean_abs = strip_extended_prefix(abs);
@@ -300,6 +321,10 @@ fn should_trigger_reconcile(
         };
         let rel_str = rel.to_string_lossy().replace('\\', "/");
         if rel_str.split('/').any(is_excluded_entry) {
+            continue;
+        }
+        let entry_name = rel_str.rsplit('/').next().unwrap_or(&rel_str);
+        if matches_exclusion_pattern(&rel_str, entry_name, &exclusion_snapshot) {
             continue;
         }
         if let Ok(guard) = suppressed.lock() {

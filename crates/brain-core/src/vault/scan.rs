@@ -1,7 +1,8 @@
 use crate::domain::errors::CoreError;
 use crate::domain::types::ScanDiagnostic;
 use crate::vault::paths::{
-    inspect_scanned_file, is_excluded_entry, open_guarded_dir, validate_vault_root,
+    inspect_scanned_file, is_excluded_entry, matches_exclusion_pattern, open_guarded_dir,
+    validate_vault_root,
 };
 use crate::vault::replace::sha256_hex;
 use std::io::Read;
@@ -27,9 +28,24 @@ pub struct VaultScanResult {
 /// Non-destructively scans regular `.md` files and attachment paths inside `vault_root`.
 /// Never modifies vault files; skips `.obsidian`, `.git`, `.pb-tmp-*`, reparse points, and cloud placeholders.
 pub fn scan_vault(vault_root: &Path) -> Result<VaultScanResult, CoreError> {
+    scan_vault_with_exclusions(vault_root, &[])
+}
+
+/// Non-destructively scans regular `.md` files and attachment paths while also skipping
+/// persistent indexing exclusion patterns (e.g., `node_modules`, `target`, `dist`).
+pub fn scan_vault_with_exclusions(
+    vault_root: &Path,
+    exclusion_patterns: &[String],
+) -> Result<VaultScanResult, CoreError> {
     let canonical_root = validate_vault_root(vault_root)?;
     let mut result = VaultScanResult::default();
-    walk_dir_recursive(&canonical_root, &canonical_root, "", &mut result)?;
+    walk_dir_recursive(
+        &canonical_root,
+        &canonical_root,
+        "",
+        exclusion_patterns,
+        &mut result,
+    )?;
     result.notes.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     result.attachments.sort();
     Ok(result)
@@ -39,6 +55,7 @@ fn walk_dir_recursive(
     canonical_root: &Path,
     dir_path: &Path,
     rel_prefix: &str,
+    exclusion_patterns: &[String],
     out: &mut VaultScanResult,
 ) -> Result<(), CoreError> {
     let entries = std::fs::read_dir(dir_path)
@@ -61,6 +78,11 @@ fn walk_dir_recursive(
         } else {
             format!("{rel_prefix}/{name}")
         };
+        if !exclusion_patterns.is_empty()
+            && matches_exclusion_pattern(&rel_path, &name, exclusion_patterns)
+        {
+            continue;
+        }
         let child_path = entry.path();
         let file_type = match entry.file_type() {
             Ok(ft) => ft,
@@ -85,7 +107,13 @@ fn walk_dir_recursive(
 
         if file_type.is_dir() {
             match open_guarded_dir(canonical_root, &child_path) {
-                Ok(_) => walk_dir_recursive(canonical_root, &child_path, &rel_path, out)?,
+                Ok(_) => walk_dir_recursive(
+                    canonical_root,
+                    &child_path,
+                    &rel_path,
+                    exclusion_patterns,
+                    out,
+                )?,
                 Err(err) => {
                     out.diagnostics.push(ScanDiagnostic {
                         rel_path,

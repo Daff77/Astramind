@@ -9,6 +9,7 @@ import type {
   EditorDraftDto,
   ErrorCode,
   ErrorEnvelope,
+  ExclusionPreviewDto,
   GraphSnapshotDto,
   MovePlan,
   MutationResult,
@@ -350,6 +351,30 @@ export function clearDraft(
 
 export function triggerReconcile(vaultId: string): Promise<boolean> {
   return invokeTyped<boolean>("trigger_reconcile", { vaultId });
+}
+
+export function getVaultExclusions(vaultId: string): Promise<string[]> {
+  return invokeTyped<string[]>("get_vault_exclusions", { vaultId });
+}
+
+export function previewVaultExclusions(
+  vaultId: string,
+  patterns: string[],
+): Promise<ExclusionPreviewDto> {
+  return invokeTyped<ExclusionPreviewDto>("preview_vault_exclusions", {
+    vaultId,
+    patterns,
+  });
+}
+
+export function setVaultExclusions(
+  vaultId: string,
+  patterns: string[],
+): Promise<ReconcileSummary> {
+  return invokeTyped<ReconcileSummary>("set_vault_exclusions", {
+    vaultId,
+    patterns,
+  });
 }
 
 export function isTauriRuntime(): boolean {

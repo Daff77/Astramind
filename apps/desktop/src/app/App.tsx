@@ -37,6 +37,7 @@ import {
   getDraft,
   getNoteBacklinks,
   getVaultBrokenLinks,
+  getVaultExclusions,
   getVaultGraph,
   listNotes,
   listRevisions,
@@ -46,6 +47,7 @@ import {
   normalizeIpcError,
   openVault,
   previewMove,
+  previewVaultExclusions,
   readNote,
   rebuildVaultIndex,
   restoreRevision,
@@ -54,6 +56,7 @@ import {
   saveDraft,
   saveNote,
   setPinned,
+  setVaultExclusions,
   subscribeVaultReconciled,
   trashNote,
   triggerReconcile,
@@ -1578,6 +1581,31 @@ export function App() {
               throw err;
             }
           }}
+          onGetExclusions={async () => {
+            if (!activeVault) return [];
+            return getVaultExclusions(activeVault.vault_id);
+          }}
+          onPreviewExclusions={async (patterns) => {
+            if (!activeVault) throw new Error("No active vault");
+            return previewVaultExclusions(activeVault.vault_id, patterns);
+          }}
+          onApplyExclusions={async (patterns) => {
+            if (!activeVault) throw new Error("No active vault");
+            const session = vaultSessionSeqRef.current;
+            setGlobalError(null);
+            try {
+              const summary = await setVaultExclusions(
+                activeVault.vault_id,
+                patterns,
+              );
+              await refreshVaultCatalog(activeVault.vault_id, session);
+              await loadGraphForVault(activeVault.vault_id, session);
+              return summary;
+            } catch (err) {
+              setGlobalError(normalizeIpcError(err));
+              throw err;
+            }
+          }}
         />
       );
     }
@@ -1607,6 +1635,26 @@ export function App() {
                 activeVault.vault_id,
                 vaultSessionSeqRef.current,
               );
+            }}
+            onGetExclusions={() => getVaultExclusions(activeVault.vault_id)}
+            onPreviewExclusions={(patterns) =>
+              previewVaultExclusions(activeVault.vault_id, patterns)
+            }
+            onApplyExclusions={async (patterns) => {
+              const session = vaultSessionSeqRef.current;
+              setGlobalError(null);
+              try {
+                const summary = await setVaultExclusions(
+                  activeVault.vault_id,
+                  patterns,
+                );
+                await refreshVaultCatalog(activeVault.vault_id, session);
+                await loadGraphForVault(activeVault.vault_id, session);
+                return summary;
+              } catch (err) {
+                setGlobalError(normalizeIpcError(err));
+                throw err;
+              }
             }}
           />
         </Suspense>

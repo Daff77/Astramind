@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { UniverseView } from "./UniverseView";
 import type { BrokenLinkDto, GraphSnapshotDto } from "../../lib/contracts";
@@ -124,5 +124,78 @@ describe("UniverseView interactions, filtering, inspector, and WebGL fallback", 
 
     fireEvent.click(screen.getByRole("button", { name: /Open Note in Editor/i }));
     expect(onOpenNote).toHaveBeenCalledWith("n-1");
+
+    // Collapsing the inspector shrinks it back to the unobtrusive inspector toggle chip.
+    fireEvent.click(screen.getByRole("button", { name: /Collapse Star Inspector/i }));
+    expect(screen.queryByLabelText("Universe node inspector")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Open Star Inspector/i }));
+    expect(screen.getByLabelText("Universe node inspector")).toBeInTheDocument();
+  });
+
+  it("supports Display settings popover and Exclusions preview/apply workflow", async () => {
+    const onGetExclusions = vi.fn().mockResolvedValue(["node_modules", "target"]);
+    const onPreviewExclusions = vi.fn().mockResolvedValue({
+      patterns: ["node_modules", "target", "dist"],
+      excluded_note_count: 42,
+      remaining_note_count: 15,
+      sample_excluded_paths: ["dist/docs.md", "node_modules/pkg/README.md"],
+    });
+    const onApplyExclusions = vi.fn().mockResolvedValue({
+      index_generation: 9,
+      indexed_notes: 15,
+      removed_notes: 42,
+      diagnostics: [],
+    });
+
+    render(
+      <UniverseView
+        graphSnapshot={SAMPLE_GRAPH}
+        brokenLinks={BROKEN}
+        selectedNodeId={null}
+        isLoading={false}
+        isDarkTheme={true}
+        reducedMotion={true}
+        onSelectNodeId={vi.fn()}
+        onOpenNote={vi.fn()}
+        onRefreshGraph={vi.fn()}
+        onGetExclusions={onGetExclusions}
+        onPreviewExclusions={onPreviewExclusions}
+        onApplyExclusions={onApplyExclusions}
+      />,
+    );
+
+    // Inspector stays collapsed until a star is selected or user opens it.
+    expect(screen.queryByLabelText("Universe node inspector")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Universe display settings/i }));
+    expect(screen.getByRole("dialog", { name: /Graph visualization settings/i })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Configure Index Exclusions/i }));
+    await waitFor(() => {
+      expect(onGetExclusions).toHaveBeenCalledTimes(1);
+    });
+    const dialog = screen.getByRole("dialog", { name: /Configure Vault Indexing Exclusions/i });
+    expect(dialog).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "dist" }));
+    fireEvent.click(screen.getByRole("button", { name: /Preview Impact/i }));
+    await waitFor(() => {
+      expect(onPreviewExclusions).toHaveBeenCalledWith([
+        "node_modules",
+        "target",
+        "dist",
+      ]);
+      expect(screen.getByText(/42 excluded · 15 indexed/i)).toBeInTheDocument();
+      expect(screen.getByText("dist/docs.md")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Apply & Rebuild Index/i }));
+    await waitFor(() => {
+      expect(onApplyExclusions).toHaveBeenCalledWith([
+        "node_modules",
+        "target",
+        "dist",
+      ]);
+    });
   });
 });
