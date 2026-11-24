@@ -2,10 +2,10 @@ use brain_core::backup::{create_backup, export_vault, restore_backup};
 use brain_core::domain::errors::{CoreError, ErrorEnvelope};
 use brain_core::domain::ids::{NoteId, RevisionId, VaultId};
 use brain_core::domain::types::{
-    ActorContext, AppHealthDto, BacklinkHit, BackupResult, BrokenLinkDto, GraphSnapshotDto,
-    MovePlan, MutationResult, NoteSnapshot, NoteSummary, Page, ReconcileSummary, RestoreResult,
-    RevisionSummaryDto, SearchFilters, SearchHit, TrashedNoteSummary, VaultOpenReport,
-    VaultSummary,
+    ActorContext, AppHealthDto, BacklinkHit, BackupResult, BrokenLinkDto, EditorDraftDto,
+    GraphSnapshotDto, MovePlan, MutationResult, NoteSnapshot, NoteSummary, Page, ReconcileSummary,
+    RestoreResult, RevisionSummaryDto, SearchFilters, SearchHit, TrashedNoteSummary,
+    VaultOpenReport, VaultSummary,
 };
 use brain_core::health_check;
 use brain_core::paths::AppPathsSpec;
@@ -13,13 +13,23 @@ use brain_core::retrieval::{get_backlinks, get_broken_links, get_graph, search_n
 use brain_core::vault::engine::VaultEngine;
 use brain_core::vault::watcher::VaultWatcher;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 
-#[derive(Default)]
 pub struct DesktopRuntimeState {
     active_watcher: Mutex<Option<(VaultId, VaultWatcher)>>,
+    watcher_epoch: Arc<AtomicU64>,
+}
+
+impl Default for DesktopRuntimeState {
+    fn default() -> Self {
+        Self {
+            active_watcher: Mutex::new(None),
+            watcher_epoch: Arc::new(AtomicU64::new(0)),
+        }
+    }
 }
 
 impl DesktopRuntimeState {
@@ -39,13 +49,19 @@ impl DesktopRuntimeState {
                 return;
             }
         }
-        // Tear down prior watcher cleanly before starting the new vault watcher.
+        // Advance epoch immediately so stale callbacks from the prior vault are dropped (`REM-047`).
+        let epoch = self.watcher_epoch.fetch_add(1, Ordering::SeqCst) + 1;
         if let Some((_, old)) = guard.take() {
-            old.stop();
+            tauri::async_runtime::spawn_blocking(move || {
+                old.stop();
+            });
         }
         let app_handle = app.clone();
+        let epoch_ref = Arc::clone(&self.watcher_epoch);
         let cb = Arc::new(move |ev| {
-            let _ = app_handle.emit("vault:reconciled", ev);
+            if epoch_ref.load(Ordering::SeqCst) == epoch {
+                let _ = app_handle.emit("vault:reconciled", ev);
+            }
         });
         if let Ok(watcher) = VaultWatcher::start_with_callback(
             paths.clone(),
@@ -68,7 +84,20 @@ impl DesktopRuntimeState {
         }
     }
 
+    fn trigger_reconcile(&self, vault_id: &VaultId) -> bool {
+        if let Ok(guard) = self.active_watcher.lock() {
+            if let Some((active_id, watcher)) = guard.as_ref() {
+                if active_id == vault_id {
+                    watcher.trigger_reconcile();
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn stop_watcher(&self) {
+        self.watcher_epoch.fetch_add(1, Ordering::SeqCst);
         let mut guard = match self.active_watcher.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
@@ -406,6 +435,57 @@ async fn export_vault_files(
     run_blocking(move || export_vault(&paths, &vault_id, Path::new(&destination))).await
 }
 
+#[tauri::command]
+async fn save_draft(
+    vault_id: VaultId,
+    note_id: NoteId,
+    rel_path: String,
+    base_hash: String,
+    draft_seq: u64,
+    body: String,
+) -> Result<EditorDraftDto, ErrorEnvelope> {
+    let paths = resolve_paths()?;
+    run_blocking(move || {
+        VaultEngine::save_draft(
+            &paths, &vault_id, &note_id, &rel_path, &base_hash, draft_seq, &body,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn get_draft(
+    vault_id: VaultId,
+    note_id: NoteId,
+) -> Result<Option<EditorDraftDto>, ErrorEnvelope> {
+    let paths = resolve_paths()?;
+    run_blocking(move || VaultEngine::get_draft(&paths, &vault_id, &note_id)).await
+}
+
+#[tauri::command]
+async fn list_drafts(vault_id: VaultId) -> Result<Vec<EditorDraftDto>, ErrorEnvelope> {
+    let paths = resolve_paths()?;
+    run_blocking(move || VaultEngine::list_drafts(&paths, &vault_id)).await
+}
+
+#[tauri::command]
+async fn clear_draft(
+    vault_id: VaultId,
+    note_id: NoteId,
+    max_draft_seq: Option<u64>,
+) -> Result<bool, ErrorEnvelope> {
+    let paths = resolve_paths()?;
+    run_blocking(move || VaultEngine::clear_draft(&paths, &vault_id, &note_id, max_draft_seq)).await
+}
+
+#[tauri::command]
+async fn trigger_reconcile(
+    runtime: State<'_, DesktopRuntimeState>,
+    vault_id: VaultId,
+) -> Result<bool, ErrorEnvelope> {
+    Ok(runtime.trigger_reconcile(&vault_id))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -435,7 +515,12 @@ pub fn run() {
             rebuild_vault_index,
             create_vault_backup,
             restore_vault_backup,
-            export_vault_files
+            export_vault_files,
+            save_draft,
+            get_draft,
+            list_drafts,
+            clear_draft,
+            trigger_reconcile
         ])
         .build(tauri::generate_context!())
         .expect("error while building Personal Brain desktop application");

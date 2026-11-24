@@ -46,6 +46,8 @@ interface EditorWorkspaceProps {
   onResolveOverwriteDisk: (noteId: string) => Promise<void>;
   onCloseDeletedTab: (noteId: string) => void;
   onOpenWikilink: (rawTarget: string) => void;
+  onRestorePendingDraft?: (noteId: string) => Promise<void>;
+  onDiscardPendingDraft?: (noteId: string) => Promise<void>;
   pendingCloseTab: EditorTabState | null;
   onCancelClosePending: () => void;
   onConfirmDiscardClosePending: () => void;
@@ -79,6 +81,8 @@ export function EditorWorkspace({
   onResolveOverwriteDisk,
   onCloseDeletedTab,
   onOpenWikilink,
+  onRestorePendingDraft,
+  onDiscardPendingDraft,
   pendingCloseTab,
   onCancelClosePending,
   onConfirmDiscardClosePending,
@@ -245,6 +249,34 @@ export function EditorWorkspace({
                 This note is marked unsupported (for example invalid UTF-8) and is
                 open read-only to prevent corruption.
               </span>
+            </div>
+          ) : null}
+
+          {activeTab.pendingDraftOffer ? (
+            <div className="pb-banner pb-banner-warn" role="status">
+              <span>
+                Recovered unsaved draft ({activeTab.pendingDraftOffer.updated_at}
+                {activeTab.pendingDraftOffer.base_hash !== activeTab.baseHash
+                  ? " — note changed on disk since draft was saved"
+                  : ""}
+                ). Restore it into editor or discard it?
+              </span>
+              <div style={{ display: "flex", gap: 6 }}>
+                <button
+                  type="button"
+                  className="pb-btn pb-btn-sm pb-btn-primary"
+                  onClick={() => onRestorePendingDraft?.(activeTab.noteId)}
+                >
+                  Restore Draft
+                </button>
+                <button
+                  type="button"
+                  className="pb-btn pb-btn-sm"
+                  onClick={() => onDiscardPendingDraft?.(activeTab.noteId)}
+                >
+                  Discard Saved Draft
+                </button>
+              </div>
             </div>
           ) : null}
 

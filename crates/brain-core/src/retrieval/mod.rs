@@ -1,8 +1,8 @@
 use crate::domain::errors::CoreError;
 use crate::domain::ids::{NoteId, VaultId};
 use crate::domain::types::{
-    BacklinkHit, BrokenLinkDto, GraphEdgeDto, GraphNodeDto, GraphSnapshotDto, Page, SearchFilters,
-    SearchHit, VerificationStatus,
+    BacklinkHit, BrokenLinkDto, GraphEdgeDto, GraphNodeDto, GraphSnapshotDto, NoteOrigin, Page,
+    ParseStatus, SearchFilters, SearchHit, VerificationStatus,
 };
 use crate::index::literal_fts_query;
 use crate::index::store::{open_healthy_index_or_rebuild, str_to_link_kind, str_to_resolution};
@@ -254,7 +254,7 @@ pub fn get_graph(paths: &AppPathsSpec, vault_id: &VaultId) -> Result<GraphSnapsh
     let mut state = VaultStateStore::open_or_init(paths, vault_id)?;
     let (index_conn, generation) =
         open_healthy_index_or_rebuild(paths, vault_id, vault_root, &mut state)?;
-    let status_map = load_verification_map(&state)?;
+    let status_map = load_note_state_map(&state)?;
 
     let mut tag_map: HashMap<String, Vec<String>> = HashMap::new();
     {
@@ -276,46 +276,9 @@ pub fn get_graph(paths: &AppPathsSpec, vault_id: &VaultId) -> Result<GraphSnapsh
         }
     }
 
-    let mut nodes = Vec::new();
-    {
-        let mut n_stmt = index_conn
-            .prepare("SELECT note_id, title, rel_path FROM notes ORDER BY note_id ASC")
-            .map_err(|err| CoreError::IoFailed(format!("prepare graph nodes: {err}")))?;
-        let n_rows = n_stmt
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                ))
-            })
-            .map_err(|err| CoreError::IoFailed(format!("query graph nodes: {err}")))?;
-        for row in n_rows {
-            let (nid_s, title, rel_path) =
-                row.map_err(|err| CoreError::IoFailed(format!("collect graph nodes: {err}")))?;
-            let id = NoteId::parse(&nid_s)?;
-            let folder = rel_path
-                .split('/')
-                .next()
-                .filter(|_| rel_path.contains('/'))
-                .unwrap_or("")
-                .to_string();
-            let verification = status_map
-                .get(&id)
-                .copied()
-                .unwrap_or(VerificationStatus::Unverified);
-            let tags = tag_map.remove(&nid_s).unwrap_or_default();
-            nodes.push(GraphNodeDto {
-                id,
-                title,
-                folder,
-                tags,
-                verification,
-            });
-        }
-    }
-
     let mut edge_counts: BTreeMap<(String, String, String), u32> = BTreeMap::new();
+    let mut incoming_counts: HashMap<String, u32> = HashMap::new();
+    let mut outgoing_counts: HashMap<String, u32> = HashMap::new();
     {
         let mut e_stmt = index_conn
             .prepare(
@@ -336,7 +299,63 @@ pub fn get_graph(paths: &AppPathsSpec, vault_id: &VaultId) -> Result<GraphSnapsh
         for row in e_rows {
             let (src, dst, kind) =
                 row.map_err(|err| CoreError::IoFailed(format!("collect graph edges: {err}")))?;
+            *outgoing_counts.entry(src.clone()).or_insert(0) += 1;
+            *incoming_counts.entry(dst.clone()).or_insert(0) += 1;
             *edge_counts.entry((src, dst, kind)).or_insert(0) += 1;
+        }
+    }
+
+    let mut nodes = Vec::new();
+    {
+        let mut n_stmt = index_conn
+            .prepare(
+                "SELECT note_id, title, rel_path, parse_status FROM notes ORDER BY note_id ASC",
+            )
+            .map_err(|err| CoreError::IoFailed(format!("prepare graph nodes: {err}")))?;
+        let n_rows = n_stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(|err| CoreError::IoFailed(format!("query graph nodes: {err}")))?;
+        for row in n_rows {
+            let (nid_s, title, rel_path, parse_s) =
+                row.map_err(|err| CoreError::IoFailed(format!("collect graph nodes: {err}")))?;
+            let id = NoteId::parse(&nid_s)?;
+            let folder = rel_path
+                .split('/')
+                .next()
+                .filter(|_| rel_path.contains('/'))
+                .unwrap_or("")
+                .to_string();
+            let (verification, origin) = status_map
+                .get(&id)
+                .copied()
+                .unwrap_or((VerificationStatus::Unverified, NoteOrigin::Imported));
+            let parse_status = match parse_s.as_str() {
+                "ok" => ParseStatus::Ok,
+                "warning" => ParseStatus::Warning,
+                _ => ParseStatus::Unsupported,
+            };
+            let tags = tag_map.remove(&nid_s).unwrap_or_default();
+            let incoming_count = incoming_counts.get(&nid_s).copied().unwrap_or(0);
+            let outgoing_count = outgoing_counts.get(&nid_s).copied().unwrap_or(0);
+            nodes.push(GraphNodeDto {
+                id,
+                rel_path,
+                title,
+                folder,
+                tags,
+                origin,
+                parse_status,
+                verification,
+                incoming_count,
+                outgoing_count,
+            });
         }
     }
 
@@ -356,6 +375,16 @@ pub fn get_graph(paths: &AppPathsSpec, vault_id: &VaultId) -> Result<GraphSnapsh
         nodes,
         edges,
     })
+}
+
+fn load_note_state_map(
+    state: &VaultStateStore,
+) -> Result<HashMap<NoteId, (VerificationStatus, NoteOrigin)>, CoreError> {
+    let mut map = HashMap::new();
+    for row in state.list_all_identities()? {
+        map.insert(row.note_id, (row.verification, row.origin));
+    }
+    Ok(map)
 }
 
 fn load_verification_map(

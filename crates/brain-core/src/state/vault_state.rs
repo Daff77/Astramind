@@ -1,6 +1,6 @@
 use crate::domain::errors::CoreError;
 use crate::domain::ids::{EventId, NoteId, OperationId, RevisionId, VaultId};
-use crate::domain::types::{NoteOrigin, VerificationStatus};
+use crate::domain::types::{EditorDraftDto, NoteOrigin, VerificationStatus};
 use crate::index::publish_staged_file_exclusive;
 use crate::paths::AppPathsSpec;
 use crate::state::registry::{configure_durable_sqlite, verify_sqlite_integrity};
@@ -13,7 +13,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-pub const STATE_SCHEMA_VERSION: u32 = 1;
+pub const STATE_SCHEMA_VERSION: u32 = 2;
 
 const STATE_MIGRATION_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS vault_meta (
@@ -149,6 +149,18 @@ CREATE INDEX IF NOT EXISTS audit_time ON audit_events(created_at);
 CREATE INDEX IF NOT EXISTS journal_status ON mutation_journal(status);
 "#;
 
+const STATE_MIGRATION_V2: &str = r#"
+CREATE TABLE IF NOT EXISTS editor_drafts (
+  note_id TEXT PRIMARY KEY REFERENCES note_identity(note_id) ON DELETE CASCADE,
+  rel_path TEXT NOT NULL,
+  base_hash TEXT NOT NULL,
+  draft_seq INTEGER NOT NULL CHECK(draft_seq > 0),
+  body TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS editor_drafts_updated ON editor_drafts(updated_at DESC);
+"#;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoteIdentityRow {
     pub note_id: NoteId,
@@ -256,6 +268,12 @@ impl VaultStateStore {
             )
             .map_err(|err| {
                 CoreError::StateUnavailable(format!("seed index generation meta: {err}"))
+            })?;
+        }
+
+        if current_version < 2 {
+            conn.execute_batch(STATE_MIGRATION_V2).map_err(|err| {
+                CoreError::StateUnavailable(format!("migrate state.sqlite v2: {err}"))
             })?;
             conn.execute_batch(&format!("PRAGMA user_version = {STATE_SCHEMA_VERSION};"))
                 .map_err(|err| {
@@ -625,6 +643,116 @@ impl VaultStateStore {
             .map_err(|err| CoreError::IoFailed(format!("run sqlite backup: {err}")))?;
         Ok(())
     }
+
+    pub fn save_draft(
+        &self,
+        vault_id: &VaultId,
+        note_id: &NoteId,
+        rel_path: &str,
+        base_hash: &str,
+        draft_seq: u64,
+        body: &str,
+    ) -> Result<EditorDraftDto, CoreError> {
+        if draft_seq == 0 {
+            return Err(CoreError::InvalidInput(
+                "draft_seq must be greater than zero".to_string(),
+            ));
+        }
+        let now = utc_now_rfc3339();
+        self.conn
+            .execute(
+                "INSERT INTO editor_drafts(note_id, rel_path, base_hash, draft_seq, body, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(note_id) DO UPDATE SET
+                   rel_path = excluded.rel_path,
+                   base_hash = excluded.base_hash,
+                   draft_seq = excluded.draft_seq,
+                   body = excluded.body,
+                   updated_at = excluded.updated_at
+                 WHERE excluded.draft_seq >= editor_drafts.draft_seq",
+                params![
+                    note_id.as_str(),
+                    rel_path,
+                    base_hash,
+                    draft_seq as i64,
+                    body,
+                    now
+                ],
+            )
+            .map_err(|err| CoreError::StateUnavailable(format!("save editor draft: {err}")))?;
+        self.get_draft(vault_id, note_id)?
+            .ok_or_else(|| CoreError::StateUnavailable("saved editor draft missing".to_string()))
+    }
+
+    pub fn get_draft(
+        &self,
+        vault_id: &VaultId,
+        note_id: &NoteId,
+    ) -> Result<Option<EditorDraftDto>, CoreError> {
+        self.conn
+            .query_row(
+                "SELECT note_id, rel_path, base_hash, draft_seq, body, updated_at
+                 FROM editor_drafts WHERE note_id = ?1",
+                params![note_id.as_str()],
+                |row| row_to_editor_draft(vault_id, row),
+            )
+            .optional()
+            .map_err(|err| CoreError::StateUnavailable(format!("read editor draft: {err}")))
+    }
+
+    pub fn list_drafts(&self, vault_id: &VaultId) -> Result<Vec<EditorDraftDto>, CoreError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT note_id, rel_path, base_hash, draft_seq, body, updated_at
+                 FROM editor_drafts ORDER BY updated_at DESC",
+            )
+            .map_err(|err| CoreError::StateUnavailable(format!("prepare list_drafts: {err}")))?;
+        let rows = stmt
+            .query_map([], |row| row_to_editor_draft(vault_id, row))
+            .map_err(|err| CoreError::StateUnavailable(format!("query list_drafts: {err}")))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| CoreError::StateUnavailable(format!("collect list_drafts: {err}")))?;
+        Ok(rows)
+    }
+
+    pub fn clear_draft(
+        &self,
+        note_id: &NoteId,
+        max_draft_seq: Option<u64>,
+    ) -> Result<bool, CoreError> {
+        let deleted = match max_draft_seq {
+            Some(seq) => self.conn.execute(
+                "DELETE FROM editor_drafts WHERE note_id = ?1 AND draft_seq <= ?2",
+                params![note_id.as_str(), seq as i64],
+            ),
+            None => self.conn.execute(
+                "DELETE FROM editor_drafts WHERE note_id = ?1",
+                params![note_id.as_str()],
+            ),
+        }
+        .map_err(|err| CoreError::StateUnavailable(format!("clear editor draft: {err}")))?;
+        Ok(deleted > 0)
+    }
+}
+
+fn row_to_editor_draft(
+    vault_id: &VaultId,
+    row: &rusqlite::Row<'_>,
+) -> Result<EditorDraftDto, rusqlite::Error> {
+    let nid_s: String = row.get(0)?;
+    let seq_i: i64 = row.get(3)?;
+    Ok(EditorDraftDto {
+        vault_id: vault_id.clone(),
+        note_id: NoteId::parse(&nid_s).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })?,
+        rel_path: row.get(1)?,
+        base_hash: row.get(2)?,
+        draft_seq: u64::try_from(seq_i).unwrap_or(1),
+        body: row.get(4)?,
+        updated_at: row.get(5)?,
+    })
 }
 
 pub(crate) fn str_to_origin(s: &str) -> NoteOrigin {

@@ -2,7 +2,7 @@
 
 - **Phase:** Phase 4 — Desktop UI & Knowledge Editor
 - **Tasks Covered:** Phase 3 Mandatory Remediation + `PB-015`, `PB-016`, `PB-017`, `PB-018`
-- **Status:** **IN_REVIEW (Quality Gate — awaiting Product Owner sign-off)**
+- **Status:** **APPROVED WITH CHANGES** (Phase 5 authorized subject to `REM-041`–`REM-048`)
 - **Base Commit:** `7788bd5` (branch `main`, Phase 3 baseline)
 - **Date:** 2026-11-24
 - **Environment:** Windows 11 (`x86_64`), Rust `1.100.0` (`stable-x86_64-pc-windows-msvc`), Node `v26.10.0`, npm `11.19.1`, VS 2022 Build Tools `14.44.35207`, Windows SDK `10.0.26100.0`, WebView2 Runtime `157.0.4341.60`
@@ -163,10 +163,10 @@ An independent read-only QA/Security/UX audit (`7bba1a08-cdab-4a88-99f2-8d2e9e19
 
 ## 8. Decision & Gate Sign-Off
 
-**Next Eligible Phase:** Phase 5 (`PB-019`–`PB-021`: 3D Universe Visualization) — **BLOCKED** pending Product Owner sign-off on Phase 4 quality gate.
+**Next Eligible Phase:** Phase 5 (`PB-019`–`PB-021`: 3D Universe Visualization) — **GO WITH MANDATORY REMEDIATION (`REM-041`–`REM-048`)**.
 
 | Role | Decision | Notes | Date |
 |---|---|---|---|
 | Engineering Orchestrator | Ready for Review | `PB-015`–`PB-018` + Phase 3 remediations complete; all automated gates & native exe smoke test pass | 2026-11-24 |
 | Independent QA / Security Reviewer | `CHANGES REQUESTED` -> Remediated | Security clean; 4 Major + 5 Minor UI findings fixed and re-verified after review (`verify-all.ps1` + native run pass) | 2026-11-24 |
-| Product Owner | `[ ] Approve / [ ] Approve with changes / [ ] Reject` | Review interactive native UI visually if desired and authorize Phase 5 | — |
+| Product Owner | **Approve with changes** | Phase 5 authorized; mandatory remediation `REM-041`–`REM-048` required prior to 3D integration | 2026-11-24 |

@@ -25,6 +25,8 @@ function makeTab(overrides: Partial<EditorTabState> = {}): EditorTabState {
     lastSavedAt: "12:00:00",
     conflict: null,
     externalUpdateNotice: null,
+    pendingDraftOffer: null,
+    draftSeq: 0,
     ...overrides,
   };
 }
@@ -282,6 +284,73 @@ describe("EditorWorkspace editing, conflicts, move preview, and close protection
     fireEvent.click(screen.getByRole("button", { name: "Confirm Move" }));
     await waitFor(() => {
       expect(onConfirmMove).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("renders durable draft recovery banner and handles Restore/Discard actions", async () => {
+    const offerTab = makeTab({
+      pendingDraftOffer: {
+        vault_id: "v-1",
+        note_id: "note-1",
+        rel_path: "projects/alpha.md",
+        base_hash: "hash-1",
+        draft_seq: 3,
+        body: "# Alpha\n\nRecovered body",
+        updated_at: "2026-11-24T12:15:00Z",
+      },
+    });
+    const onRestorePendingDraft = vi.fn().mockResolvedValue(undefined);
+    const onDiscardPendingDraft = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <EditorWorkspace
+        vaultId="v-1"
+        notes={[]}
+        tabs={[offerTab]}
+        activeTab={offerTab}
+        viewMode="edit"
+        showExplorer={true}
+        showInspector={true}
+        isBusy={false}
+        onChangeViewMode={vi.fn()}
+        onToggleExplorer={vi.fn()}
+        onToggleInspector={vi.fn()}
+        onSelectTab={vi.fn()}
+        onRequestCloseTab={vi.fn()}
+        onChangeDraft={vi.fn()}
+        onSaveTab={vi.fn().mockResolvedValue(undefined)}
+        onCreateNotePrompt={vi.fn().mockResolvedValue(undefined)}
+        onPreviewMove={vi.fn()}
+        onConfirmMove={vi.fn().mockResolvedValue(undefined)}
+        onConfirmTrash={vi.fn().mockResolvedValue(undefined)}
+        onResolveReloadExternal={vi.fn().mockResolvedValue(undefined)}
+        onResolveSaveCopy={vi.fn().mockResolvedValue(undefined)}
+        onResolveOverwriteDisk={vi.fn().mockResolvedValue(undefined)}
+        onCloseDeletedTab={vi.fn()}
+        onOpenWikilink={vi.fn()}
+        onRestorePendingDraft={onRestorePendingDraft}
+        onDiscardPendingDraft={onDiscardPendingDraft}
+        pendingCloseTab={null}
+        onCancelClosePending={vi.fn()}
+        onConfirmDiscardClosePending={vi.fn()}
+        onConfirmSaveAndClosePending={vi.fn().mockResolvedValue(undefined)}
+        moveModalNote={null}
+        onCloseMoveModal={vi.fn()}
+        trashModalNote={null}
+        onCloseTrashModal={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByText(/Recovered unsaved draft/i),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Restore Draft" }));
+    await waitFor(() => {
+      expect(onRestorePendingDraft).toHaveBeenCalledWith("note-1");
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Discard Saved Draft" }));
+    await waitFor(() => {
+      expect(onDiscardPendingDraft).toHaveBeenCalledWith("note-1");
     });
   });
 

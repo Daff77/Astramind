@@ -1,12 +1,21 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type {
   AppHealthDto,
   BacklinkHit,
   BrokenLinkDto,
-  DraftSnapshot,
+  EditorDraftDto,
   EditorTabState,
   EditorViewMode,
   ErrorEnvelope,
+  GraphSnapshotDto,
   MovePlan,
   NavSection,
   NoteSnapshot,
@@ -18,14 +27,17 @@ import type {
   WatcherEventDto,
 } from "../lib/contracts";
 import {
+  clearDraft,
   createNote,
   createRequestId,
   createVault,
   createVaultBackup,
   exportVaultFiles,
   fetchAppHealth,
+  getDraft,
   getNoteBacklinks,
   getVaultBrokenLinks,
+  getVaultGraph,
   listNotes,
   listRevisions,
   listTrashedNotes,
@@ -39,10 +51,12 @@ import {
   restoreRevision,
   restoreTrashedNote,
   restoreVaultBackup,
+  saveDraft,
   saveNote,
   setPinned,
   subscribeVaultReconciled,
   trashNote,
+  triggerReconcile,
 } from "../lib/ipc";
 import { ActivityRail } from "../features/shell/ActivityRail";
 import { StatusBar } from "../features/shell/StatusBar";
@@ -53,10 +67,19 @@ import { EditorWorkspace } from "../features/editor/EditorWorkspace";
 import { NoteInspector } from "../features/inspector/NoteInspector";
 import { SearchPanel } from "../features/search/SearchPanel";
 import { SettingsView } from "../features/settings/SettingsView";
+import { isStaleGraphSnapshot } from "../features/universe/graphModel";
+
+const LazyUniverseView = lazy(() =>
+  import("../features/universe/UniverseView").then((mod) => ({
+    default: mod.UniverseView,
+  })),
+);
 
 const PREF_THEME_KEY = "pb.pref.theme";
 const PREF_VIEW_MODE_KEY = "pb.pref.viewMode";
 const PREF_AUTOSAVE_KEY = "pb.pref.autosave";
+const DRAFT_PERSIST_DEBOUNCE_MS = 350;
+const AUTOSAVE_DEBOUNCE_MS = 850;
 
 function readInitialTheme(): ThemePreference {
   const saved = window.localStorage.getItem(PREF_THEME_KEY);
@@ -79,57 +102,19 @@ function readInitialAutosave(): boolean {
   return saved !== "false";
 }
 
-function draftStorageKey(vaultId: string, noteId: string): string {
-  return `pb.draft.${vaultId}.${noteId}`;
-}
-
-function loadSessionDraft(
-  vaultId: string,
-  noteId: string,
-): DraftSnapshot | null {
-  try {
-    const raw = window.sessionStorage.getItem(draftStorageKey(vaultId, noteId));
-    if (!raw) return null;
-    return JSON.parse(raw) as DraftSnapshot;
-  } catch {
-    return null;
-  }
-}
-
-function saveSessionDraft(draft: DraftSnapshot): void {
-  try {
-    window.sessionStorage.setItem(
-      draftStorageKey(draft.vaultId, draft.noteId),
-      JSON.stringify(draft),
-    );
-  } catch {
-    // Ignore quota failures cleanly
-  }
-}
-
-function clearSessionDraft(vaultId: string, noteId: string): void {
-  try {
-    window.sessionStorage.removeItem(draftStorageKey(vaultId, noteId));
-  } catch {
-    // Ignore storage cleanup errors
-  }
-}
-
 function snapshotToTab(
   snapshot: NoteSnapshot,
-  recoveredDraft: DraftSnapshot | null,
+  recoveredDraft: EditorDraftDto | null,
 ): EditorTabState {
-  const hasRecoveredDraft =
-    recoveredDraft !== null &&
-    recoveredDraft.baseHash === snapshot.content_hash &&
-    recoveredDraft.draftBody !== snapshot.body;
+  const hasUsableOffer =
+    recoveredDraft !== null && recoveredDraft.body !== snapshot.body;
 
   return {
     noteId: snapshot.note_id,
     relPath: snapshot.rel_path,
     title: snapshot.title,
     savedBody: snapshot.body,
-    draftBody: hasRecoveredDraft ? recoveredDraft.draftBody : snapshot.body,
+    draftBody: snapshot.body,
     baseHash: snapshot.content_hash,
     parseStatus: snapshot.parse_status,
     origin: snapshot.origin,
@@ -138,13 +123,13 @@ function snapshotToTab(
     tags: snapshot.tags,
     aliases: snapshot.aliases,
     indexGeneration: snapshot.index_generation,
-    dirty: hasRecoveredDraft,
-    saveState: hasRecoveredDraft ? "dirty" : "saved",
+    dirty: false,
+    saveState: "saved",
     lastSavedAt: null,
     conflict: null,
-    externalUpdateNotice: hasRecoveredDraft
-      ? "Recovered unsaved draft from this session."
-      : null,
+    externalUpdateNotice: null,
+    pendingDraftOffer: hasUsableOffer ? recoveredDraft : null,
+    draftSeq: recoveredDraft?.draft_seq ?? 0,
   };
 }
 
@@ -158,14 +143,55 @@ function formatTimeShort(): string {
 
 function makeConflictCopyPath(relPath: string): string {
   const dotIdx = relPath.lastIndexOf(".");
-  const stamp = new Date()
-    .toISOString()
-    .replace(/[:.]/g, "-")
-    .slice(0, 19);
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
   if (dotIdx > 0) {
     return `${relPath.slice(0, dotIdx)}.conflict-${stamp}${relPath.slice(dotIdx)}`;
   }
   return `${relPath}.conflict-${stamp}.md`;
+}
+
+function usePrefersDark(theme: ThemePreference): boolean {
+  const [sysDark, setSysDark] = useState<boolean>(() =>
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function"
+      ? window.matchMedia("(prefers-color-scheme: dark)").matches
+      : false,
+  );
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return;
+    }
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const listener = (ev: MediaQueryListEvent) => setSysDark(ev.matches);
+    mq.addEventListener("change", listener);
+    return () => mq.removeEventListener("change", listener);
+  }, []);
+
+  if (theme === "dark") return true;
+  if (theme === "light") return false;
+  return sysDark;
+}
+
+function usePrefersReducedMotion(): boolean {
+  const [reduced, setReduced] = useState<boolean>(() =>
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function"
+      ? window.matchMedia("(prefers-reduced-motion: reduce)").matches
+      : false,
+  );
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return;
+    }
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const listener = (ev: MediaQueryListEvent) => setReduced(ev.matches);
+    mq.addEventListener("change", listener);
+    return () => mq.removeEventListener("change", listener);
+  }, []);
+
+  return reduced;
 }
 
 export function App() {
@@ -199,6 +225,14 @@ export function App() {
   const [revisions, setRevisions] = useState<RevisionSummaryDto[]>([]);
   const [isLoadingDetails, setIsLoadingDetails] = useState(false);
 
+  const [graphSnapshot, setGraphSnapshot] = useState<GraphSnapshotDto | null>(
+    null,
+  );
+  const [selectedUniverseNodeId, setSelectedUniverseNodeId] = useState<
+    string | null
+  >(null);
+  const [isLoadingGraph, setIsLoadingGraph] = useState(false);
+
   const [moveModalNote, setMoveModalNote] = useState<NoteSummary | null>(null);
   const [trashModalNote, setTrashModalNote] = useState<NoteSummary | null>(
     null,
@@ -214,11 +248,21 @@ export function App() {
   const [isBusy, setIsBusy] = useState(false);
   const [globalError, setGlobalError] = useState<ErrorEnvelope | null>(null);
   const [externalNotice, setExternalNotice] = useState<string | null>(null);
+  const [staleWatcherMessage, setStaleWatcherMessage] = useState<string | null>(
+    null,
+  );
+
+  const isDarkTheme = usePrefersDark(theme);
+  const reducedMotion = usePrefersReducedMotion();
 
   const tabsRef = useRef<EditorTabState[]>(tabs);
   const activeVaultRef = useRef<VaultSummary | null>(activeVault);
   const notesRef = useRef<NoteSummary[]>(notes);
+  const graphRef = useRef<GraphSnapshotDto | null>(graphSnapshot);
+  const navSectionRef = useRef<NavSection>(navSection);
+  const vaultSessionSeqRef = useRef(0);
   const autosaveTimersRef = useRef<Map<string, number>>(new Map());
+  const draftTimersRef = useRef<Map<string, number>>(new Map());
   const inFlightSavesRef = useRef<Set<string>>(new Set());
   const pendingResaveRef = useRef<Set<string>>(new Set());
   const performSaveRef = useRef<
@@ -238,6 +282,14 @@ export function App() {
   }, [notes]);
 
   useEffect(() => {
+    graphRef.current = graphSnapshot;
+  }, [graphSnapshot]);
+
+  useEffect(() => {
+    navSectionRef.current = navSection;
+  }, [navSection]);
+
+  useEffect(() => {
     if (theme === "system") {
       delete document.documentElement.dataset.theme;
     } else {
@@ -253,6 +305,17 @@ export function App() {
   useEffect(() => {
     window.localStorage.setItem(PREF_AUTOSAVE_KEY, String(autosaveEnabled));
   }, [autosaveEnabled]);
+
+  useEffect(() => {
+    const handleBeforeUnload = (ev: BeforeUnloadEvent) => {
+      if (tabsRef.current.some((t) => t.dirty || t.conflict !== null)) {
+        ev.preventDefault();
+        ev.returnValue = "";
+      }
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -276,36 +339,120 @@ export function App() {
     };
   }, []);
 
-  const refreshVaultCatalog = useCallback(async (vaultId: string) => {
-    const [noteList, brokenList, trashList, allVaults] = await Promise.all([
-      listNotes(vaultId),
-      getVaultBrokenLinks(vaultId),
-      listTrashedNotes(vaultId),
-      listVaults(),
-    ]);
-    setNotes(noteList);
-    setBrokenLinks(brokenList);
-    setTrashedNotes(trashList);
-    setVaults(allVaults);
-    const updatedActive = allVaults.find((v) => v.vault_id === vaultId);
-    if (updatedActive) {
-      setActiveVault(updatedActive);
+  const clearAllDraftTimers = useCallback(() => {
+    for (const timer of draftTimersRef.current.values()) {
+      window.clearTimeout(timer);
     }
+    draftTimersRef.current.clear();
   }, []);
 
+  const clearAllAutosaveTimers = useCallback(() => {
+    for (const timer of autosaveTimersRef.current.values()) {
+      window.clearTimeout(timer);
+    }
+    autosaveTimersRef.current.clear();
+    clearAllDraftTimers();
+  }, [clearAllDraftTimers]);
+
+  useEffect(() => {
+    return () => {
+      clearAllAutosaveTimers();
+    };
+  }, [clearAllAutosaveTimers]);
+
+  const refreshVaultCatalog = useCallback(
+    async (vaultId: string, expectedSession?: number) => {
+      const [noteList, brokenList, trashList, allVaults] = await Promise.all([
+        listNotes(vaultId),
+        getVaultBrokenLinks(vaultId),
+        listTrashedNotes(vaultId),
+        listVaults(),
+      ]);
+      if (
+        (expectedSession !== undefined &&
+          vaultSessionSeqRef.current !== expectedSession) ||
+        activeVaultRef.current?.vault_id !== vaultId
+      ) {
+        return;
+      }
+      setNotes(noteList);
+      setBrokenLinks(brokenList);
+      setTrashedNotes(trashList);
+      setVaults(allVaults);
+      const updatedActive = allVaults.find((v) => v.vault_id === vaultId);
+      if (updatedActive) {
+        setActiveVault(updatedActive);
+      }
+    },
+    [],
+  );
+
+  const loadGraphForVault = useCallback(
+    async (vaultId: string, expectedSession = vaultSessionSeqRef.current) => {
+      setIsLoadingGraph(true);
+      try {
+        const snap = await getVaultGraph(vaultId);
+        if (
+          vaultSessionSeqRef.current !== expectedSession ||
+          activeVaultRef.current?.vault_id !== vaultId
+        ) {
+          return;
+        }
+        const current = graphRef.current;
+        if (
+          isStaleGraphSnapshot(
+            current
+              ? { vaultId: current.vault_id, generation: current.generation }
+              : null,
+            snap,
+          )
+        ) {
+          return;
+        }
+        setGraphSnapshot(snap);
+      } catch (err) {
+        if (vaultSessionSeqRef.current === expectedSession) {
+          setGlobalError(normalizeIpcError(err));
+        }
+      } finally {
+        if (vaultSessionSeqRef.current === expectedSession) {
+          setIsLoadingGraph(false);
+        }
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (navSection === "universe" && activeVault) {
+      void loadGraphForVault(activeVault.vault_id, vaultSessionSeqRef.current);
+    }
+  }, [navSection, activeVault, loadGraphForVault]);
+
   const loadNoteDetails = useCallback(async (vaultId: string, noteId: string) => {
+    const sessionAtStart = vaultSessionSeqRef.current;
     setIsLoadingDetails(true);
     try {
       const [incoming, historyList] = await Promise.all([
         getNoteBacklinks(vaultId, noteId),
         listRevisions(vaultId, noteId),
       ]);
+      if (
+        vaultSessionSeqRef.current !== sessionAtStart ||
+        activeVaultRef.current?.vault_id !== vaultId
+      ) {
+        return;
+      }
       setBacklinks(incoming);
       setRevisions(historyList);
     } catch (err) {
-      setGlobalError(normalizeIpcError(err));
+      if (vaultSessionSeqRef.current === sessionAtStart) {
+        setGlobalError(normalizeIpcError(err));
+      }
     } finally {
-      setIsLoadingDetails(false);
+      if (vaultSessionSeqRef.current === sessionAtStart) {
+        setIsLoadingDetails(false);
+      }
     }
   }, []);
 
@@ -323,7 +470,7 @@ export function App() {
           getNoteBacklinks(vaultId, noteId),
           listRevisions(vaultId, noteId),
         ]);
-        if (cancelled) return;
+        if (cancelled || activeVaultRef.current?.vault_id !== vaultId) return;
         setBacklinks(incoming);
         setRevisions(historyList);
       } catch (err) {
@@ -337,13 +484,6 @@ export function App() {
     };
   }, [activeVault, activeNoteId]);
 
-  const clearAllAutosaveTimers = useCallback(() => {
-    for (const timer of autosaveTimersRef.current.values()) {
-      window.clearTimeout(timer);
-    }
-    autosaveTimersRef.current.clear();
-  }, []);
-
   const executeVaultSwitch = useCallback(
     async (
       action:
@@ -352,8 +492,12 @@ export function App() {
         | { kind: "open"; rootPath: string },
     ) => {
       clearAllAutosaveTimers();
+      inFlightSavesRef.current.clear();
+      pendingResaveRef.current.clear();
+      const session = ++vaultSessionSeqRef.current;
       setIsBusy(true);
       setGlobalError(null);
+      setStaleWatcherMessage(null);
       try {
         const report =
           action.kind === "activate"
@@ -364,18 +508,27 @@ export function App() {
                   action.displayName || undefined,
                 )
               : await openVault(action.rootPath);
+        if (vaultSessionSeqRef.current !== session) return;
+
+        activeVaultRef.current = report.vault;
         setActiveVault(report.vault);
         setTabs([]);
         setActiveNoteId(null);
         setBacklinks([]);
         setRevisions([]);
+        setGraphSnapshot(null);
+        setSelectedUniverseNodeId(null);
         setShowOnboarding(false);
         setNavSection("knowledge");
-        await refreshVaultCatalog(report.vault.vault_id);
+        await refreshVaultCatalog(report.vault.vault_id, session);
       } catch (err) {
-        setGlobalError(normalizeIpcError(err));
+        if (vaultSessionSeqRef.current === session) {
+          setGlobalError(normalizeIpcError(err));
+        }
       } finally {
-        setIsBusy(false);
+        if (vaultSessionSeqRef.current === session) {
+          setIsBusy(false);
+        }
       }
     },
     [clearAllAutosaveTimers, refreshVaultCatalog],
@@ -421,6 +574,7 @@ export function App() {
   const openNoteById = useCallback(async (noteId: string) => {
     const vault = activeVaultRef.current;
     if (!vault) return;
+    const session = vaultSessionSeqRef.current;
 
     const alreadyOpen = tabsRef.current.find((t) => t.noteId === noteId);
     if (alreadyOpen) {
@@ -433,37 +587,72 @@ export function App() {
     setIsBusy(true);
     setGlobalError(null);
     try {
-      const snapshot = await readNote(vault.vault_id, noteId);
-      const recovered = loadSessionDraft(vault.vault_id, noteId);
+      const [snapshot, recovered] = await Promise.all([
+        readNote(vault.vault_id, noteId),
+        getDraft(vault.vault_id, noteId).catch(() => null),
+      ]);
+      if (
+        vaultSessionSeqRef.current !== session ||
+        activeVaultRef.current?.vault_id !== vault.vault_id
+      ) {
+        return;
+      }
       const newTab = snapshotToTab(snapshot, recovered);
       setTabs((prev) => {
         if (prev.some((t) => t.noteId === noteId)) return prev;
         return [...prev, newTab];
       });
       setActiveNoteId(noteId);
-      setRecentNoteIds((prev) => [
-        noteId,
-        ...prev.filter((id) => id !== noteId),
-      ].slice(0, 10));
+      setRecentNoteIds((prev) =>
+        [noteId, ...prev.filter((id) => id !== noteId)].slice(0, 10),
+      );
       setNavSection("knowledge");
       setShowOnboarding(false);
     } catch (err) {
-      setGlobalError(normalizeIpcError(err));
+      if (vaultSessionSeqRef.current === session) {
+        setGlobalError(normalizeIpcError(err));
+      }
     } finally {
-      setIsBusy(false);
+      if (vaultSessionSeqRef.current === session) {
+        setIsBusy(false);
+      }
     }
   }, []);
+
+  const persistDurableDraftNow = useCallback(
+    async (
+      vaultId: string,
+      noteId: string,
+      relPath: string,
+      baseHash: string,
+      draftSeq: number,
+      body: string,
+    ) => {
+      try {
+        await saveDraft(vaultId, noteId, relPath, baseHash, draftSeq, body);
+      } catch {
+        // Non-fatal; in-memory draft remains intact and autosave/manual save still operate.
+      }
+    },
+    [],
+  );
 
   const performSave = useCallback(
     async (noteId: string, overrideExpectedHash?: string) => {
       const vault = activeVaultRef.current;
       const tab = tabsRef.current.find((t) => t.noteId === noteId);
       if (!vault || !tab) return;
+      const session = vaultSessionSeqRef.current;
 
       const timer = autosaveTimersRef.current.get(noteId);
       if (timer !== undefined) {
         window.clearTimeout(timer);
         autosaveTimersRef.current.delete(noteId);
+      }
+      const draftTimer = draftTimersRef.current.get(noteId);
+      if (draftTimer !== undefined) {
+        window.clearTimeout(draftTimer);
+        draftTimersRef.current.delete(noteId);
       }
 
       if (inFlightSavesRef.current.has(noteId)) {
@@ -473,6 +662,7 @@ export function App() {
 
       inFlightSavesRef.current.add(noteId);
       const bodyToSave = tab.draftBody;
+      const seqAtSave = tab.draftSeq;
       const baseHashToUse = overrideExpectedHash ?? tab.baseHash;
 
       setTabs((prev) =>
@@ -490,24 +680,30 @@ export function App() {
           bodyToSave,
           createRequestId(),
         );
+        if (vaultSessionSeqRef.current !== session) return;
+
         const refreshed = await readNote(vault.vault_id, noteId);
+        if (vaultSessionSeqRef.current !== session) return;
+
         const latestTab = tabsRef.current.find((t) => t.noteId === noteId);
         const stillModified = Boolean(
           latestTab && latestTab.draftBody !== bodyToSave,
         );
 
         if (stillModified && latestTab) {
-          saveSessionDraft({
-            vaultId: vault.vault_id,
+          await persistDurableDraftNow(
+            vault.vault_id,
             noteId,
-            relPath: refreshed.rel_path,
-            draftBody: latestTab.draftBody,
-            baseHash: result.content_hash,
-            updatedAt: new Date().toISOString(),
-          });
-        } else {
-          clearSessionDraft(vault.vault_id, noteId);
+            refreshed.rel_path,
+            result.content_hash,
+            latestTab.draftSeq,
+            latestTab.draftBody,
+          );
+        } else if (seqAtSave > 0) {
+          await clearDraft(vault.vault_id, noteId, seqAtSave).catch(() => false);
         }
+
+        if (vaultSessionSeqRef.current !== session) return;
 
         setTabs((prev) =>
           prev.map((t) => {
@@ -529,13 +725,18 @@ export function App() {
               lastSavedAt: formatTimeShort(),
               conflict: null,
               externalUpdateNotice: null,
+              pendingDraftOffer: null,
             };
           }),
         );
 
-        await refreshVaultCatalog(vault.vault_id);
+        await refreshVaultCatalog(vault.vault_id, session);
         await loadNoteDetails(vault.vault_id, noteId);
+        if (navSectionRef.current === "universe") {
+          void loadGraphForVault(vault.vault_id, session);
+        }
       } catch (err) {
+        if (vaultSessionSeqRef.current !== session) return;
         pendingResaveRef.current.delete(noteId);
         const envelope = normalizeIpcError(err);
         if (envelope.code === "NOTE_NOT_FOUND") {
@@ -563,6 +764,7 @@ export function App() {
         } else if (envelope.code === "CONFLICT") {
           try {
             const diskSnapshot = await readNote(vault.vault_id, noteId);
+            if (vaultSessionSeqRef.current !== session) return;
             setTabs((prev) =>
               prev.map((t) =>
                 t.noteId === noteId
@@ -585,6 +787,7 @@ export function App() {
               ),
             );
           } catch (readErr) {
+            if (vaultSessionSeqRef.current !== session) return;
             const readEnvelope = normalizeIpcError(readErr);
             setTabs((prev) =>
               prev.map((t) =>
@@ -620,7 +823,10 @@ export function App() {
         setGlobalError(envelope);
       } finally {
         inFlightSavesRef.current.delete(noteId);
-        if (pendingResaveRef.current.delete(noteId)) {
+        if (
+          vaultSessionSeqRef.current === session &&
+          pendingResaveRef.current.delete(noteId)
+        ) {
           const latest = tabsRef.current.find((t) => t.noteId === noteId);
           if (latest && latest.dirty && !latest.conflict) {
             void performSaveRef.current(noteId);
@@ -628,7 +834,12 @@ export function App() {
         }
       }
     },
-    [loadNoteDetails, refreshVaultCatalog],
+    [
+      loadGraphForVault,
+      loadNoteDetails,
+      persistDurableDraftNow,
+      refreshVaultCatalog,
+    ],
   );
 
   useEffect(() => {
@@ -642,6 +853,11 @@ export function App() {
       if (!vault || !existing) return;
 
       const isDirty = nextBody !== existing.savedBody;
+      const nextSeq = existing.draftSeq + 1;
+      const vaultId = vault.vault_id;
+      const relPath = existing.relPath;
+      const baseHash = existing.baseHash;
+
       setTabs((prev) =>
         prev.map((t) => {
           if (t.noteId !== noteId) return t;
@@ -649,27 +865,39 @@ export function App() {
             ...t,
             draftBody: nextBody,
             dirty: isDirty,
+            draftSeq: nextSeq,
             saveState: t.conflict
               ? "conflict"
               : isDirty
                 ? "dirty"
                 : "saved",
             externalUpdateNotice: null,
+            pendingDraftOffer: null,
           };
         }),
       );
 
+      const prevDraftTimer = draftTimersRef.current.get(noteId);
+      if (prevDraftTimer !== undefined) {
+        window.clearTimeout(prevDraftTimer);
+        draftTimersRef.current.delete(noteId);
+      }
+
       if (isDirty) {
-        saveSessionDraft({
-          vaultId: vault.vault_id,
-          noteId,
-          relPath: existing.relPath,
-          draftBody: nextBody,
-          baseHash: existing.baseHash,
-          updatedAt: new Date().toISOString(),
-        });
+        const draftHandle = window.setTimeout(() => {
+          draftTimersRef.current.delete(noteId);
+          void persistDurableDraftNow(
+            vaultId,
+            noteId,
+            relPath,
+            baseHash,
+            nextSeq,
+            nextBody,
+          );
+        }, DRAFT_PERSIST_DEBOUNCE_MS);
+        draftTimersRef.current.set(noteId, draftHandle);
       } else {
-        clearSessionDraft(vault.vault_id, noteId);
+        void clearDraft(vaultId, noteId, nextSeq).catch(() => false);
       }
 
       const prevTimer = autosaveTimersRef.current.get(noteId);
@@ -682,129 +910,157 @@ export function App() {
         const handle = window.setTimeout(() => {
           autosaveTimersRef.current.delete(noteId);
           void performSave(noteId);
-        }, 850);
+        }, AUTOSAVE_DEBOUNCE_MS);
         autosaveTimersRef.current.set(noteId, handle);
       }
     },
-    [autosaveEnabled, performSave],
+    [autosaveEnabled, performSave, persistDurableDraftNow],
   );
 
-  // Watcher event synchronization
+  // Watcher event synchronization (`vault:reconciled`)
   useEffect(() => {
     if (!activeVault) return;
     let active = true;
     let unlisten: (() => void) | null = null;
     const vaultId = activeVault.vault_id;
+    const session = vaultSessionSeqRef.current;
 
     (async () => {
-      unlisten = await subscribeVaultReconciled(async (event: WatcherEventDto) => {
-        if (!active || event.vault_id !== vaultId) return;
-        setExternalNotice(
-          `Synced external changes (Gen #${event.index_generation})`,
-        );
-        try {
-          await refreshVaultCatalog(vaultId);
-        } catch (err) {
-          setGlobalError(normalizeIpcError(err));
-        }
+      unlisten = await subscribeVaultReconciled(
+        async (event: WatcherEventDto) => {
+          if (
+            !active ||
+            vaultSessionSeqRef.current !== session ||
+            event.vault_id !== vaultId
+          ) {
+            return;
+          }
 
-        const openTabsSnapshot = [...tabsRef.current];
-        for (const tab of openTabsSnapshot) {
+          if (event.stale) {
+            setStaleWatcherMessage(
+              event.error_message ??
+                "Background watcher failed to reconcile external edits.",
+            );
+            return;
+          }
+
+          setStaleWatcherMessage(null);
+          setExternalNotice(
+            event.from_overflow
+              ? `Full vault rescan synced (Gen #${event.index_generation})`
+              : `Synced external changes (Gen #${event.index_generation})`,
+          );
           try {
-            const disk = await readNote(vaultId, tab.noteId);
-            const changed =
-              disk.content_hash !== tab.baseHash ||
-              disk.rel_path !== tab.relPath;
-            if (!changed) continue;
+            await refreshVaultCatalog(vaultId, session);
+            if (navSectionRef.current === "universe") {
+              await loadGraphForVault(vaultId, session);
+            }
+          } catch (err) {
+            if (vaultSessionSeqRef.current === session) {
+              setGlobalError(normalizeIpcError(err));
+            }
+          }
 
-            setTabs((prev) =>
-              prev.map((current) => {
-                if (current.noteId !== tab.noteId) return current;
-                if (!current.dirty) {
+          const openTabsSnapshot = [...tabsRef.current];
+          for (const tab of openTabsSnapshot) {
+            if (vaultSessionSeqRef.current !== session) break;
+            try {
+              const disk = await readNote(vaultId, tab.noteId);
+              if (vaultSessionSeqRef.current !== session) break;
+              const changed =
+                disk.content_hash !== tab.baseHash ||
+                disk.rel_path !== tab.relPath;
+              if (!changed) continue;
+
+              setTabs((prev) =>
+                prev.map((current) => {
+                  if (current.noteId !== tab.noteId) return current;
+                  if (!current.dirty) {
+                    return {
+                      ...current,
+                      relPath: disk.rel_path,
+                      title: disk.title,
+                      savedBody: disk.body,
+                      draftBody: disk.body,
+                      baseHash: disk.content_hash,
+                      parseStatus: disk.parse_status,
+                      tags: disk.tags,
+                      aliases: disk.aliases,
+                      indexGeneration: disk.index_generation,
+                      saveState: "saved",
+                      conflict: null,
+                      externalUpdateNotice:
+                        "Note reloaded after external disk update.",
+                    };
+                  }
                   return {
                     ...current,
-                    relPath: disk.rel_path,
-                    title: disk.title,
-                    savedBody: disk.body,
-                    draftBody: disk.body,
-                    baseHash: disk.content_hash,
-                    parseStatus: disk.parse_status,
-                    tags: disk.tags,
-                    aliases: disk.aliases,
-                    indexGeneration: disk.index_generation,
-                    saveState: "saved",
-                    conflict: null,
-                    externalUpdateNotice:
-                      "Note reloaded after external disk update.",
+                    saveState: "conflict",
+                    conflict: {
+                      kind: "modified",
+                      noteId: current.noteId,
+                      relPath: disk.rel_path,
+                      localBody: current.draftBody,
+                      localBaseHash: current.baseHash,
+                      externalBody: disk.body,
+                      externalHash: disk.content_hash,
+                      message:
+                        "Modified externally on disk while you have unsaved edits.",
+                    },
                   };
-                }
-                return {
-                  ...current,
-                  saveState: "conflict",
-                  conflict: {
-                    kind: "modified",
-                    noteId: current.noteId,
-                    relPath: disk.rel_path,
-                    localBody: current.draftBody,
-                    localBaseHash: current.baseHash,
-                    externalBody: disk.body,
-                    externalHash: disk.content_hash,
-                    message:
-                      "Modified externally on disk while you have unsaved edits.",
-                  },
-                };
-              }),
-            );
-          } catch (err) {
-            const env = normalizeIpcError(err);
-            if (env.code === "NOTE_NOT_FOUND") {
-              const target = tabsRef.current.find(
-                (t) => t.noteId === tab.noteId,
+                }),
               );
-              if (target && !target.dirty) {
-                const remaining = tabsRef.current.filter(
-                  (t) => t.noteId !== tab.noteId,
+            } catch (err) {
+              const env = normalizeIpcError(err);
+              if (env.code === "NOTE_NOT_FOUND") {
+                const target = tabsRef.current.find(
+                  (t) => t.noteId === tab.noteId,
                 );
-                setTabs(remaining);
-                setActiveNoteId((curr) =>
-                  curr === tab.noteId
-                    ? remaining[remaining.length - 1]?.noteId ?? null
-                    : curr,
-                );
-              } else if (target) {
-                setTabs((prev) =>
-                  prev.map((t) =>
-                    t.noteId === tab.noteId
-                      ? {
-                          ...t,
-                          saveState: "conflict",
-                          conflict: {
-                            kind: "deleted",
-                            noteId: t.noteId,
-                            relPath: t.relPath,
-                            localBody: t.draftBody,
-                            localBaseHash: t.baseHash,
-                            externalBody: null,
-                            externalHash: null,
-                            message:
-                              "Note was deleted or moved outside Personal Brain while you have unsaved edits.",
-                          },
-                        }
-                      : t,
-                  ),
-                );
+                if (target && !target.dirty) {
+                  const remaining = tabsRef.current.filter(
+                    (t) => t.noteId !== tab.noteId,
+                  );
+                  setTabs(remaining);
+                  setActiveNoteId((curr) =>
+                    curr === tab.noteId
+                      ? remaining[remaining.length - 1]?.noteId ?? null
+                      : curr,
+                  );
+                } else if (target) {
+                  setTabs((prev) =>
+                    prev.map((t) =>
+                      t.noteId === tab.noteId
+                        ? {
+                            ...t,
+                            saveState: "conflict",
+                            conflict: {
+                              kind: "deleted",
+                              noteId: t.noteId,
+                              relPath: t.relPath,
+                              localBody: t.draftBody,
+                              localBaseHash: t.baseHash,
+                              externalBody: null,
+                              externalHash: null,
+                              message:
+                                "Note was deleted or moved outside Personal Brain while you have unsaved edits.",
+                            },
+                          }
+                        : t,
+                    ),
+                  );
+                }
               }
             }
           }
-        }
-      });
+        },
+      );
     })();
 
     return () => {
       active = false;
       if (unlisten) unlisten();
     };
-  }, [activeVault, refreshVaultCatalog]);
+  }, [activeVault, loadGraphForVault, refreshVaultCatalog]);
 
   // Global keyboard shortcuts
   useEffect(() => {
@@ -855,8 +1111,24 @@ export function App() {
         window.clearTimeout(timer);
         autosaveTimersRef.current.delete(noteId);
       }
-      if (activeVaultRef.current) {
-        clearSessionDraft(activeVaultRef.current.vault_id, noteId);
+      const draftTimer = draftTimersRef.current.get(noteId);
+      if (draftTimer !== undefined) {
+        window.clearTimeout(draftTimer);
+        draftTimersRef.current.delete(noteId);
+      }
+      const closingTab = tabsRef.current.find((t) => t.noteId === noteId);
+      if (
+        activeVaultRef.current &&
+        closingTab &&
+        closingTab.pendingDraftOffer === null &&
+        closingTab.dirty &&
+        closingTab.draftSeq > 0
+      ) {
+        void clearDraft(
+          activeVaultRef.current.vault_id,
+          noteId,
+          closingTab.draftSeq,
+        ).catch(() => false);
       }
       const nextTabs = tabsRef.current.filter((t) => t.noteId !== noteId);
       setTabs(nextTabs);
@@ -881,10 +1153,75 @@ export function App() {
     [closeTabImmediately],
   );
 
+  const handleRestorePendingDraft = useCallback(
+    async (noteId: string) => {
+      const vault = activeVaultRef.current;
+      const tab = tabsRef.current.find((t) => t.noteId === noteId);
+      if (!vault || !tab?.pendingDraftOffer) return;
+      const offer = tab.pendingDraftOffer;
+      const isCleanMismatch = offer.base_hash !== tab.baseHash;
+      setTabs((prev) =>
+        prev.map((t) =>
+          t.noteId === noteId
+            ? {
+                ...t,
+                draftBody: offer.body,
+                dirty: true,
+                draftSeq: Math.max(t.draftSeq, offer.draft_seq),
+                saveState: isCleanMismatch ? "conflict" : "dirty",
+                conflict: isCleanMismatch
+                  ? {
+                      kind: "modified",
+                      noteId,
+                      relPath: t.relPath,
+                      localBody: offer.body,
+                      localBaseHash: offer.base_hash,
+                      externalBody: t.savedBody,
+                      externalHash: t.baseHash,
+                      message:
+                        "Recovered draft was based on an older version of this note. Review differences before saving.",
+                    }
+                  : null,
+                pendingDraftOffer: null,
+                externalUpdateNotice: isCleanMismatch
+                  ? null
+                  : "Unsaved draft restored.",
+              }
+            : t,
+        ),
+      );
+    },
+    [],
+  );
+
+  const handleDiscardPendingDraft = useCallback(async (noteId: string) => {
+    const vault = activeVaultRef.current;
+    const tab = tabsRef.current.find((t) => t.noteId === noteId);
+    if (!vault || !tab) return;
+    const seqCap = Math.max(tab.draftSeq, tab.pendingDraftOffer?.draft_seq ?? 0);
+    await clearDraft(
+      vault.vault_id,
+      noteId,
+      seqCap > 0 ? seqCap : undefined,
+    ).catch(() => false);
+    setTabs((prev) =>
+      prev.map((t) =>
+        t.noteId === noteId
+          ? {
+              ...t,
+              pendingDraftOffer: null,
+              externalUpdateNotice: null,
+            }
+          : t,
+      ),
+    );
+  }, []);
+
   const handleCreateNote = useCallback(
     async (relPath: string) => {
       const vault = activeVaultRef.current;
       if (!vault) return;
+      const session = vaultSessionSeqRef.current;
       setIsBusy(true);
       setGlobalError(null);
       try {
@@ -896,13 +1233,18 @@ export function App() {
           `# ${stem}\n\n`,
           createRequestId(),
         );
-        await refreshVaultCatalog(vault.vault_id);
+        if (vaultSessionSeqRef.current !== session) return;
+        await refreshVaultCatalog(vault.vault_id, session);
         await openNoteById(result.note_id);
       } catch (err) {
-        setGlobalError(normalizeIpcError(err));
+        if (vaultSessionSeqRef.current === session) {
+          setGlobalError(normalizeIpcError(err));
+        }
         throw err;
       } finally {
-        setIsBusy(false);
+        if (vaultSessionSeqRef.current === session) {
+          setIsBusy(false);
+        }
       }
     },
     [openNoteById, refreshVaultCatalog],
@@ -912,15 +1254,19 @@ export function App() {
     async (noteId: string, pinned: boolean) => {
       const vault = activeVaultRef.current;
       if (!vault) return;
+      const session = vaultSessionSeqRef.current;
       setGlobalError(null);
       try {
         await setPinned(vault.vault_id, noteId, pinned);
+        if (vaultSessionSeqRef.current !== session) return;
         setTabs((prev) =>
           prev.map((t) => (t.noteId === noteId ? { ...t, pinned } : t)),
         );
-        await refreshVaultCatalog(vault.vault_id);
+        await refreshVaultCatalog(vault.vault_id, session);
       } catch (err) {
-        setGlobalError(normalizeIpcError(err));
+        if (vaultSessionSeqRef.current === session) {
+          setGlobalError(normalizeIpcError(err));
+        }
       }
     },
     [refreshVaultCatalog],
@@ -960,11 +1306,14 @@ export function App() {
     async (plan: MovePlan, expectedHash: string) => {
       const vault = activeVaultRef.current;
       if (!vault) return;
+      const session = vaultSessionSeqRef.current;
       setIsBusy(true);
       setGlobalError(null);
       try {
         const result = await moveNote(plan, expectedHash, createRequestId());
+        if (vaultSessionSeqRef.current !== session) return;
         const snapshot = await readNote(vault.vault_id, result.note_id);
+        if (vaultSessionSeqRef.current !== session) return;
         setTabs((prev) =>
           prev.map((t) =>
             t.noteId === result.note_id
@@ -981,14 +1330,18 @@ export function App() {
           ),
         );
         setMoveModalNote(null);
-        await refreshVaultCatalog(vault.vault_id);
+        await refreshVaultCatalog(vault.vault_id, session);
         if (activeNoteId === result.note_id) {
           await loadNoteDetails(vault.vault_id, result.note_id);
         }
       } catch (err) {
-        setGlobalError(normalizeIpcError(err));
+        if (vaultSessionSeqRef.current === session) {
+          setGlobalError(normalizeIpcError(err));
+        }
       } finally {
-        setIsBusy(false);
+        if (vaultSessionSeqRef.current === session) {
+          setIsBusy(false);
+        }
       }
     },
     [activeNoteId, loadNoteDetails, refreshVaultCatalog],
@@ -998,48 +1351,56 @@ export function App() {
     async (noteId: string, expectedHash: string) => {
       const vault = activeVaultRef.current;
       if (!vault) return;
+      const session = vaultSessionSeqRef.current;
       setIsBusy(true);
       setGlobalError(null);
       try {
         await trashNote(vault.vault_id, noteId, expectedHash, createRequestId());
+        if (vaultSessionSeqRef.current !== session) return;
         setTrashModalNote(null);
         closeTabImmediately(noteId);
-        await refreshVaultCatalog(vault.vault_id);
+        await refreshVaultCatalog(vault.vault_id, session);
       } catch (err) {
-        setGlobalError(normalizeIpcError(err));
+        if (vaultSessionSeqRef.current === session) {
+          setGlobalError(normalizeIpcError(err));
+        }
       } finally {
-        setIsBusy(false);
+        if (vaultSessionSeqRef.current === session) {
+          setIsBusy(false);
+        }
       }
     },
     [closeTabImmediately, refreshVaultCatalog],
   );
 
-  const handleResolveReloadExternal = useCallback(
-    async (noteId: string) => {
-      const vault = activeVaultRef.current;
-      if (!vault) return;
-      setGlobalError(null);
-      try {
-        const disk = await readNote(vault.vault_id, noteId);
-        clearSessionDraft(vault.vault_id, noteId);
-        setTabs((prev) =>
-          prev.map((t) =>
-            t.noteId === noteId ? snapshotToTab(disk, null) : t,
-          ),
-        );
-      } catch (err) {
+  const handleResolveReloadExternal = useCallback(async (noteId: string) => {
+    const vault = activeVaultRef.current;
+    if (!vault) return;
+    const session = vaultSessionSeqRef.current;
+    setGlobalError(null);
+    try {
+      const disk = await readNote(vault.vault_id, noteId);
+      if (vaultSessionSeqRef.current !== session) return;
+      await clearDraft(vault.vault_id, noteId).catch(() => false);
+      setTabs((prev) =>
+        prev.map((t) =>
+          t.noteId === noteId ? snapshotToTab(disk, null) : t,
+        ),
+      );
+    } catch (err) {
+      if (vaultSessionSeqRef.current === session) {
         setGlobalError(normalizeIpcError(err));
-        throw err;
       }
-    },
-    [],
-  );
+      throw err;
+    }
+  }, []);
 
   const handleResolveSaveCopy = useCallback(
     async (noteId: string) => {
       const vault = activeVaultRef.current;
       const tab = tabsRef.current.find((t) => t.noteId === noteId);
       if (!vault || !tab) return;
+      const session = vaultSessionSeqRef.current;
       setGlobalError(null);
       try {
         const copyPath = makeConflictCopyPath(tab.relPath);
@@ -1049,11 +1410,14 @@ export function App() {
           tab.draftBody,
           createRequestId(),
         );
-        clearSessionDraft(vault.vault_id, noteId);
-        await refreshVaultCatalog(vault.vault_id);
+        if (vaultSessionSeqRef.current !== session) return;
+        await clearDraft(vault.vault_id, noteId).catch(() => false);
+        await refreshVaultCatalog(vault.vault_id, session);
         await openNoteById(created.note_id);
       } catch (err) {
-        setGlobalError(normalizeIpcError(err));
+        if (vaultSessionSeqRef.current === session) {
+          setGlobalError(normalizeIpcError(err));
+        }
         throw err;
       }
     },
@@ -1064,6 +1428,7 @@ export function App() {
     async (noteId: string) => {
       const tab = tabsRef.current.find((t) => t.noteId === noteId);
       if (!tab?.conflict?.externalHash) return;
+      // Preserve optimistic concurrency strictly against the observed external hash (`REM-043`).
       await performSave(noteId, tab.conflict.externalHash);
     },
     [performSave],
@@ -1074,6 +1439,7 @@ export function App() {
       const vault = activeVaultRef.current;
       const tab = tabsRef.current.find((t) => t.noteId === revision.note_id);
       if (!vault || !tab) return;
+      const session = vaultSessionSeqRef.current;
       setIsBusy(true);
       setGlobalError(null);
       try {
@@ -1083,19 +1449,25 @@ export function App() {
           tab.baseHash,
           createRequestId(),
         );
+        if (vaultSessionSeqRef.current !== session) return;
         const restored = await readNote(vault.vault_id, tab.noteId);
-        clearSessionDraft(vault.vault_id, tab.noteId);
+        if (vaultSessionSeqRef.current !== session) return;
+        await clearDraft(vault.vault_id, tab.noteId).catch(() => false);
         setTabs((prev) =>
           prev.map((t) =>
             t.noteId === tab.noteId ? snapshotToTab(restored, null) : t,
           ),
         );
-        await refreshVaultCatalog(vault.vault_id);
+        await refreshVaultCatalog(vault.vault_id, session);
         await loadNoteDetails(vault.vault_id, tab.noteId);
       } catch (err) {
-        setGlobalError(normalizeIpcError(err));
+        if (vaultSessionSeqRef.current === session) {
+          setGlobalError(normalizeIpcError(err));
+        }
       } finally {
-        setIsBusy(false);
+        if (vaultSessionSeqRef.current === session) {
+          setIsBusy(false);
+        }
       }
     },
     [loadNoteDetails, refreshVaultCatalog],
@@ -1133,10 +1505,12 @@ export function App() {
           onOpenOnboarding={() => setShowOnboarding(true)}
           onRebuildIndex={async () => {
             if (!activeVault) throw new Error("No active vault");
+            const session = vaultSessionSeqRef.current;
             setGlobalError(null);
             try {
               const summary = await rebuildVaultIndex(activeVault.vault_id);
-              await refreshVaultCatalog(activeVault.vault_id);
+              await refreshVaultCatalog(activeVault.vault_id, session);
+              await loadGraphForVault(activeVault.vault_id, session);
               return summary;
             } catch (err) {
               setGlobalError(normalizeIpcError(err));
@@ -1177,6 +1551,7 @@ export function App() {
           }}
           onRestoreTrashed={async (noteId) => {
             if (!activeVault) return;
+            const session = vaultSessionSeqRef.current;
             setGlobalError(null);
             try {
               await restoreTrashedNote(
@@ -1184,8 +1559,10 @@ export function App() {
                 noteId,
                 createRequestId(),
               );
-              await refreshVaultCatalog(activeVault.vault_id);
-              await openNoteById(noteId);
+              await refreshVaultCatalog(activeVault.vault_id, session);
+              if (vaultSessionSeqRef.current === session) {
+                await openNoteById(noteId);
+              }
             } catch (err) {
               setGlobalError(normalizeIpcError(err));
               throw err;
@@ -1202,6 +1579,37 @@ export function App() {
             }
           }}
         />
+      );
+    }
+
+    if (navSection === "universe" && activeVault) {
+      return (
+        <Suspense
+          fallback={
+            <div className="pb-empty-state">
+              <div className="pb-empty-box">Loading 3D Knowledge Universe…</div>
+            </div>
+          }
+        >
+          <LazyUniverseView
+            graphSnapshot={graphSnapshot}
+            brokenLinks={brokenLinks}
+            selectedNodeId={selectedUniverseNodeId}
+            isLoading={isLoadingGraph}
+            isDarkTheme={isDarkTheme}
+            reducedMotion={reducedMotion}
+            onSelectNodeId={setSelectedUniverseNodeId}
+            onOpenNote={(noteId) => {
+              void openNoteById(noteId);
+            }}
+            onRefreshGraph={() => {
+              void loadGraphForVault(
+                activeVault.vault_id,
+                vaultSessionSeqRef.current,
+              );
+            }}
+          />
+        </Suspense>
       );
     }
 
@@ -1289,6 +1697,8 @@ export function App() {
           onResolveOverwriteDisk={handleResolveOverwriteDisk}
           onCloseDeletedTab={closeTabImmediately}
           onOpenWikilink={handleOpenWikilink}
+          onRestorePendingDraft={handleRestorePendingDraft}
+          onDiscardPendingDraft={handleDiscardPendingDraft}
           pendingCloseTab={pendingCloseTab}
           onCancelClosePending={() => setPendingCloseTabId(null)}
           onConfirmDiscardClosePending={() => {
@@ -1356,7 +1766,15 @@ export function App() {
         activeTab={activeTab}
         isBusy={isBusy}
         externalNotice={externalNotice}
+        staleWatcherMessage={staleWatcherMessage}
         errorEnvelope={globalError}
+        onRetrySync={
+          activeVault
+            ? () => {
+                void triggerReconcile(activeVault.vault_id);
+              }
+            : undefined
+        }
         onDismissError={() => setGlobalError(null)}
         onDismissNotice={() => setExternalNotice(null)}
       />
@@ -1388,7 +1806,9 @@ export function App() {
         >
           <div className="pb-modal">
             <div className="pb-modal-header">
-              <h2>Unsaved notes in {activeVault?.display_name ?? "current vault"}</h2>
+              <h2>
+                Unsaved notes in {activeVault?.display_name ?? "current vault"}
+              </h2>
             </div>
             <div className="pb-modal-body">
               <p style={{ margin: 0 }}>
@@ -1411,7 +1831,10 @@ export function App() {
                   const action = pendingVaultAction;
                   if (activeVaultRef.current) {
                     for (const tab of tabsRef.current) {
-                      clearSessionDraft(activeVaultRef.current.vault_id, tab.noteId);
+                      await clearDraft(
+                        activeVaultRef.current.vault_id,
+                        tab.noteId,
+                      ).catch(() => false);
                     }
                   }
                   setPendingVaultAction(null);

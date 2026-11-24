@@ -176,10 +176,15 @@ export interface BrokenLinkDto {
 
 export interface GraphNodeDto {
   id: string;
+  rel_path: string;
   title: string;
   folder: string;
   tags: string[];
+  origin: NoteOrigin;
+  parse_status: ParseStatus;
   verification: VerificationStatus;
+  incoming_count: number;
+  outgoing_count: number;
 }
 
 export interface GraphEdgeDto {
@@ -241,9 +246,22 @@ export interface WatcherEventDto {
   indexed_notes: number;
   removed_notes: number;
   from_overflow: boolean;
+  stale: boolean;
+  error_code: ErrorCode | null;
+  error_message: string | null;
 }
 
-export type NavSection = "home" | "knowledge" | "settings";
+export interface EditorDraftDto {
+  vault_id: string;
+  note_id: string;
+  rel_path: string;
+  base_hash: string;
+  draft_seq: number;
+  body: string;
+  updated_at: string;
+}
+
+export type NavSection = "home" | "knowledge" | "universe" | "settings";
 
 export type ThemePreference = "system" | "light" | "dark";
 
@@ -281,6 +299,8 @@ export interface EditorTabState {
   lastSavedAt: string | null;
   conflict: ConflictState | null;
   externalUpdateNotice: string | null;
+  pendingDraftOffer: EditorDraftDto | null;
+  draftSeq: number;
 }
 
 export interface DraftSnapshot {

@@ -1,4 +1,4 @@
-use crate::domain::errors::CoreError;
+use crate::domain::errors::{CoreError, ErrorCode};
 use crate::domain::ids::VaultId;
 use crate::domain::types::{ReconcileSummary, WatcherEventDto};
 use crate::paths::AppPathsSpec;
@@ -14,21 +14,30 @@ use std::time::{Duration, Instant};
 
 pub type ReconcileCallback = Arc<dyn Fn(WatcherEventDto) + Send + Sync>;
 
+const DEFAULT_RETRY_BASE_MS: u64 = 200;
+const DEFAULT_MAX_RETRIES: usize = 5;
+const DEFAULT_WATCHER_LOCK_TIMEOUT_MS: u64 = 300;
+
 #[derive(Debug, Clone)]
 pub struct WatcherStats {
     pub reconcile_runs: usize,
     pub last_generation: u64,
     pub missed_or_overflow_events: usize,
+    pub consecutive_failures: usize,
+    pub retry_attempts: usize,
+    pub is_stale: bool,
 }
 
 enum ControlMsg {
     FsEvent(Result<Event, notify::Error>),
     ForceReconcile,
+    SimulatedOverflow,
     Stop,
 }
 
-/// Debounced native Windows filesystem watcher with self-write suppression, overflow
-/// fallback to full vault reconciliation, and optional UI event callback (`PB-013`, Phase 4 §4.2).
+/// Debounced native Windows filesystem watcher with self-write suppression, transient failure
+/// retention with bounded exponential backoff (`REM-042`), overflow fallback to full vault
+/// reconciliation (`REM-046`), and optional UI event callback (`PB-013`, `REM-047`).
 pub struct VaultWatcher {
     _watcher: RecommendedWatcher,
     tx: Sender<ControlMsg>,
@@ -54,6 +63,29 @@ impl VaultWatcher {
         debounce: Duration,
         on_reconciled: Option<ReconcileCallback>,
     ) -> Result<Self, CoreError> {
+        Self::start_with_options(
+            paths,
+            vault_id,
+            vault_root,
+            debounce,
+            Duration::from_millis(DEFAULT_RETRY_BASE_MS),
+            DEFAULT_MAX_RETRIES,
+            Duration::from_millis(DEFAULT_WATCHER_LOCK_TIMEOUT_MS),
+            on_reconciled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_with_options(
+        paths: AppPathsSpec,
+        vault_id: VaultId,
+        vault_root: PathBuf,
+        debounce: Duration,
+        retry_base_backoff: Duration,
+        max_retries: usize,
+        lock_timeout: Duration,
+        on_reconciled: Option<ReconcileCallback>,
+    ) -> Result<Self, CoreError> {
         let (tx, rx) = mpsc::channel::<ControlMsg>();
         let event_tx = tx.clone();
 
@@ -72,6 +104,9 @@ impl VaultWatcher {
             reconcile_runs: 0,
             last_generation: 0,
             missed_or_overflow_events: 0,
+            consecutive_failures: 0,
+            retry_attempts: 0,
+            is_stale: false,
         }));
 
         let suppressed_bg = Arc::clone(&suppressed);
@@ -79,42 +114,80 @@ impl VaultWatcher {
         let root_bg = vault_root.clone();
 
         let worker = thread::spawn(move || {
-            let mut dirty = false;
-            let mut last_event_at = Instant::now();
+            let mut state = WorkerLoopState {
+                dirty: false,
+                pending_overflow: false,
+                last_event_at: Instant::now(),
+                next_retry_at: None,
+                failures: 0,
+            };
 
             loop {
-                let wait = if dirty {
-                    debounce
-                } else {
-                    Duration::from_millis(500)
-                };
+                let wait = compute_wait(&state, debounce);
 
                 match rx.recv_timeout(wait) {
                     Ok(ControlMsg::Stop) => break,
                     Ok(ControlMsg::ForceReconcile) => {
-                        run_reconcile(&paths, &vault_id, &stats_bg, false, on_reconciled.as_ref());
-                        dirty = false;
+                        state.failures = 0;
+                        state.next_retry_at = None;
+                        run_reconcile_with_retention(
+                            &paths,
+                            &vault_id,
+                            &stats_bg,
+                            state.pending_overflow,
+                            retry_base_backoff,
+                            max_retries,
+                            lock_timeout,
+                            on_reconciled.as_ref(),
+                            &mut state,
+                        );
+                    }
+                    Ok(ControlMsg::SimulatedOverflow) | Ok(ControlMsg::FsEvent(Err(_))) => {
+                        state.dirty = true;
+                        state.pending_overflow = true;
+                        state.failures = 0;
+                        state.next_retry_at = None;
+                        run_reconcile_with_retention(
+                            &paths,
+                            &vault_id,
+                            &stats_bg,
+                            true,
+                            retry_base_backoff,
+                            max_retries,
+                            lock_timeout,
+                            on_reconciled.as_ref(),
+                            &mut state,
+                        );
                     }
                     Ok(ControlMsg::FsEvent(Ok(ev))) => {
                         if should_trigger_reconcile(&root_bg, &ev, &suppressed_bg) {
-                            dirty = true;
-                            last_event_at = Instant::now();
+                            state.dirty = true;
+                            state.last_event_at = Instant::now();
+                            // Clear exhausted stale retry counter when a fresh filesystem change arrives.
+                            if state.next_retry_at.is_none() && state.failures > max_retries {
+                                state.failures = 0;
+                            }
                         }
                     }
-                    Ok(ControlMsg::FsEvent(Err(_))) => {
-                        run_reconcile(&paths, &vault_id, &stats_bg, true, on_reconciled.as_ref());
-                        dirty = false;
-                    }
                     Err(RecvTimeoutError::Timeout) => {
-                        if dirty && last_event_at.elapsed() >= debounce {
-                            run_reconcile(
+                        let ready_debounce = state.dirty
+                            && state.next_retry_at.is_none()
+                            && state.last_event_at.elapsed() >= debounce;
+                        let ready_retry = state
+                            .next_retry_at
+                            .is_some_and(|deadline| Instant::now() >= deadline);
+                        if ready_debounce || ready_retry {
+                            run_reconcile_with_retention(
                                 &paths,
                                 &vault_id,
                                 &stats_bg,
-                                false,
+                                state.pending_overflow,
+                                retry_base_backoff,
+                                max_retries,
+                                lock_timeout,
                                 on_reconciled.as_ref(),
+                                &mut state,
                             );
-                            dirty = false;
                         }
                     }
                     Err(RecvTimeoutError::Disconnected) => break,
@@ -144,6 +217,12 @@ impl VaultWatcher {
         let _ = self.tx.send(ControlMsg::ForceReconcile);
     }
 
+    /// Injects a deterministic overflow message into the watcher worker queue so
+    /// overflow-recovery paths can be verified without provoking OS ring-buffer drops.
+    pub fn simulate_overflow(&self) {
+        let _ = self.tx.send(ControlMsg::SimulatedOverflow);
+    }
+
     #[must_use]
     pub fn stats(&self) -> WatcherStats {
         self.stats
@@ -153,6 +232,9 @@ impl VaultWatcher {
                 reconcile_runs: 0,
                 last_generation: 0,
                 missed_or_overflow_events: 0,
+                consecutive_failures: 0,
+                retry_attempts: 0,
+                is_stale: false,
             })
     }
 
@@ -170,6 +252,27 @@ impl Drop for VaultWatcher {
         if let Some(handle) = self.worker.take() {
             let _ = handle.join();
         }
+    }
+}
+
+struct WorkerLoopState {
+    dirty: bool,
+    pending_overflow: bool,
+    last_event_at: Instant,
+    next_retry_at: Option<Instant>,
+    failures: usize,
+}
+
+fn compute_wait(state: &WorkerLoopState, debounce: Duration) -> Duration {
+    if let Some(deadline) = state.next_retry_at {
+        return deadline
+            .saturating_duration_since(Instant::now())
+            .max(Duration::from_millis(5));
+    }
+    if state.dirty {
+        debounce
+    } else {
+        Duration::from_millis(500)
     }
 }
 
@@ -199,7 +302,6 @@ fn should_trigger_reconcile(
         if rel_str.split('/').any(is_excluded_entry) {
             continue;
         }
-        // Check self-write suppression cache using guarded handle read (never raw unvalidated read).
         if let Ok(guard) = suppressed.lock() {
             if let Some((expected_hash, ts)) = guard.get(&path_key(&rel_str)) {
                 if ts.elapsed() < Duration::from_secs(2) {
@@ -222,30 +324,98 @@ fn should_trigger_reconcile(
     false
 }
 
-fn run_reconcile(
+#[allow(clippy::too_many_arguments)]
+fn run_reconcile_with_retention(
     paths: &AppPathsSpec,
     vault_id: &VaultId,
     stats: &Arc<Mutex<WatcherStats>>,
     from_overflow: bool,
+    retry_base_backoff: Duration,
+    max_retries: usize,
+    lock_timeout: Duration,
     on_reconciled: Option<&ReconcileCallback>,
+    state: &mut WorkerLoopState,
 ) {
-    let summary: Result<ReconcileSummary, CoreError> = VaultEngine::rebuild_index(paths, vault_id);
-    if let Ok(mut guard) = stats.lock() {
-        if from_overflow {
-            guard.missed_or_overflow_events += 1;
+    let summary: Result<ReconcileSummary, CoreError> =
+        VaultEngine::rebuild_index_with_timeout(paths, vault_id, lock_timeout);
+    match summary {
+        Ok(s) => {
+            if let Ok(mut guard) = stats.lock() {
+                if from_overflow {
+                    guard.missed_or_overflow_events += 1;
+                }
+                guard.reconcile_runs += 1;
+                guard.last_generation = s.index_generation;
+                guard.consecutive_failures = 0;
+                guard.is_stale = false;
+            }
+            state.dirty = false;
+            state.pending_overflow = false;
+            state.failures = 0;
+            state.next_retry_at = None;
+
+            if let Some(cb) = on_reconciled {
+                cb(WatcherEventDto {
+                    vault_id: vault_id.clone(),
+                    index_generation: s.index_generation,
+                    indexed_notes: s.indexed_notes,
+                    removed_notes: s.removed_notes,
+                    from_overflow,
+                    stale: false,
+                    error_code: None,
+                    error_message: None,
+                });
+            }
         }
-        if let Ok(ref s) = summary {
-            guard.reconcile_runs += 1;
-            guard.last_generation = s.index_generation;
+        Err(err) => {
+            state.failures += 1;
+            let shift = (state.failures.saturating_sub(1)).min(5) as u32;
+            let exhausted = state.failures > max_retries;
+            let mut last_gen = 0;
+
+            if let Ok(mut guard) = stats.lock() {
+                if from_overflow && exhausted {
+                    guard.missed_or_overflow_events += 1;
+                }
+                guard.consecutive_failures = state.failures;
+                guard.retry_attempts += 1;
+                guard.is_stale = exhausted;
+                last_gen = guard.last_generation;
+            }
+
+            if exhausted {
+                // Keep dirty/stale visibility until explicit ForceReconcile or a new filesystem event.
+                state.dirty = false;
+                state.next_retry_at = None;
+                if let Some(cb) = on_reconciled {
+                    cb(WatcherEventDto {
+                        vault_id: vault_id.clone(),
+                        index_generation: last_gen,
+                        indexed_notes: 0,
+                        removed_notes: 0,
+                        from_overflow,
+                        stale: true,
+                        error_code: Some(err.code()),
+                        error_message: Some(redact_watcher_error(&err)),
+                    });
+                }
+            } else {
+                state.dirty = true;
+                state.pending_overflow = from_overflow;
+                let delay = retry_base_backoff
+                    .checked_mul(1u32 << shift)
+                    .unwrap_or(Duration::from_secs(5));
+                state.next_retry_at = Some(Instant::now() + delay);
+            }
         }
     }
-    if let (Ok(s), Some(cb)) = (summary, on_reconciled) {
-        cb(WatcherEventDto {
-            vault_id: vault_id.clone(),
-            index_generation: s.index_generation,
-            indexed_notes: s.indexed_notes,
-            removed_notes: s.removed_notes,
-            from_overflow,
-        });
+}
+
+fn redact_watcher_error(err: &CoreError) -> String {
+    match err.code() {
+        ErrorCode::Busy => "Vault lock busy during reconciliation".to_string(),
+        ErrorCode::VaultUnavailable => "Vault directory unavailable".to_string(),
+        ErrorCode::RecoveryRequired => "Vault state recovery required".to_string(),
+        _ => "Background reconciliation failed; manual resync required".to_string(),
     }
 }

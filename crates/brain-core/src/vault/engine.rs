@@ -1039,10 +1039,18 @@ impl VaultEngine {
         paths: &AppPathsSpec,
         vault_id: &VaultId,
     ) -> Result<ReconcileSummary, CoreError> {
+        Self::rebuild_index_with_timeout(paths, vault_id, DEFAULT_LOCK_TIMEOUT)
+    }
+
+    pub fn rebuild_index_with_timeout(
+        paths: &AppPathsSpec,
+        vault_id: &VaultId,
+        lock_timeout: Duration,
+    ) -> Result<ReconcileSummary, CoreError> {
         let registry = RegistryStore::open(paths)?;
         let record = registry.get_vault(vault_id)?;
         let vault_root = Path::new(&record.root_path);
-        let _lock = VaultLock::acquire(&paths.vault_lock_file(vault_id), DEFAULT_LOCK_TIMEOUT)?;
+        let _lock = VaultLock::acquire(&paths.vault_lock_file(vault_id), lock_timeout)?;
         let mut state = VaultStateStore::open_or_init(paths, vault_id)?;
         Self::recover_pending_journal(vault_root, &mut state)?;
         let (summary, _, _, _) = rebuild_generation_index(vault_id, vault_root, &mut state)?;
@@ -1801,5 +1809,59 @@ impl VaultEngine {
             .optional()
             .map_err(|err| CoreError::StateUnavailable(format!("lookup note id by path: {err}")))?;
         raw.map(|s| NoteId::parse(&s)).transpose()
+    }
+
+    pub fn save_draft(
+        paths: &AppPathsSpec,
+        vault_id: &VaultId,
+        note_id: &NoteId,
+        rel_path: &str,
+        base_hash: &str,
+        draft_seq: u64,
+        body: &str,
+    ) -> Result<crate::domain::types::EditorDraftDto, CoreError> {
+        let registry = RegistryStore::open(paths)?;
+        let _ = registry.get_vault(vault_id)?;
+        let _lock = VaultLock::acquire(&paths.vault_lock_file(vault_id), DEFAULT_LOCK_TIMEOUT)?;
+        let state = VaultStateStore::open_or_init(paths, vault_id)?;
+        let exists = state.get_note_by_id(note_id)?.is_some();
+        if !exists {
+            return Err(CoreError::NoteNotFound("note not found".to_string()));
+        }
+        state.save_draft(vault_id, note_id, rel_path, base_hash, draft_seq, body)
+    }
+
+    pub fn get_draft(
+        paths: &AppPathsSpec,
+        vault_id: &VaultId,
+        note_id: &NoteId,
+    ) -> Result<Option<crate::domain::types::EditorDraftDto>, CoreError> {
+        let registry = RegistryStore::open(paths)?;
+        let _ = registry.get_vault(vault_id)?;
+        let state = VaultStateStore::open_or_init(paths, vault_id)?;
+        state.get_draft(vault_id, note_id)
+    }
+
+    pub fn list_drafts(
+        paths: &AppPathsSpec,
+        vault_id: &VaultId,
+    ) -> Result<Vec<crate::domain::types::EditorDraftDto>, CoreError> {
+        let registry = RegistryStore::open(paths)?;
+        let _ = registry.get_vault(vault_id)?;
+        let state = VaultStateStore::open_or_init(paths, vault_id)?;
+        state.list_drafts(vault_id)
+    }
+
+    pub fn clear_draft(
+        paths: &AppPathsSpec,
+        vault_id: &VaultId,
+        note_id: &NoteId,
+        max_draft_seq: Option<u64>,
+    ) -> Result<bool, CoreError> {
+        let registry = RegistryStore::open(paths)?;
+        let _ = registry.get_vault(vault_id)?;
+        let _lock = VaultLock::acquire(&paths.vault_lock_file(vault_id), DEFAULT_LOCK_TIMEOUT)?;
+        let state = VaultStateStore::open_or_init(paths, vault_id)?;
+        state.clear_draft(note_id, max_draft_seq)
     }
 }

@@ -64,11 +64,12 @@ export function ActivityRail({
 
       <button
         type="button"
-        className="pb-rail-btn"
-        aria-label="Universe (Unavailable in Phase 4)"
-        title="Universe (Phase 5 — not yet enabled)"
-        disabled
-        aria-disabled="true"
+        className={`pb-rail-btn ${activeSection === "universe" ? "is-active" : ""}`}
+        aria-label="Universe"
+        title={hasActiveVault ? "Knowledge Universe (3D)" : "Open a vault first"}
+        aria-pressed={activeSection === "universe"}
+        disabled={!hasActiveVault}
+        onClick={() => onSelectSection("universe")}
       >
         <Orbit size={18} strokeWidth={1.75} />
       </button>

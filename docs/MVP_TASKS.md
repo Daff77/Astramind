@@ -162,7 +162,7 @@ Initial state all 30 TODO; docs drafted, review pending. Update in repository on
 
 | Task | Status | Task | Status | Task | Status |
 |---|---|---|---|---|---|
-| PB-001 | DONE | PB-011 | DONE | PB-021 | TODO |
+| PB-001 | DONE | PB-011 | DONE | PB-021 | IN_REVIEW |
 | PB-002 | DONE | PB-012 | DONE | PB-022 | TODO |
 | PB-003 | DONE | PB-013 | DONE | PB-023 | TODO |
 | PB-004 | DONE | PB-014 | DONE | PB-024 | TODO |
@@ -170,8 +170,8 @@ Initial state all 30 TODO; docs drafted, review pending. Update in repository on
 | PB-006 | DONE | PB-016 | DONE | PB-026 | TODO |
 | PB-007 | DONE | PB-017 | DONE | PB-027 | TODO |
 | PB-008 | DONE | PB-018 | DONE | PB-028 | TODO |
-| PB-009 | DONE | PB-019 | TODO | PB-029 | TODO |
-| PB-010 | DONE | PB-020 | TODO | PB-030 | TODO |
+| PB-009 | DONE | PB-019 | DONE | PB-029 | TODO |
+| PB-010 | DONE | PB-020 | DONE | PB-030 | TODO |
 
 ### Per-task evidence template
 

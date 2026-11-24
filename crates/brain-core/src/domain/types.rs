@@ -1,3 +1,4 @@
+use crate::domain::errors::ErrorCode;
 use crate::domain::ids::{GrantId, NoteId, OperationId, RevisionId, VaultId};
 use serde::{Deserialize, Serialize};
 
@@ -278,10 +279,15 @@ pub struct RestoreResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphNodeDto {
     pub id: NoteId,
+    pub rel_path: String,
     pub title: String,
     pub folder: String,
     pub tags: Vec<String>,
+    pub origin: NoteOrigin,
+    pub parse_status: ParseStatus,
     pub verification: VerificationStatus,
+    pub incoming_count: u32,
+    pub outgoing_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -326,4 +332,18 @@ pub struct WatcherEventDto {
     pub indexed_notes: usize,
     pub removed_notes: usize,
     pub from_overflow: bool,
+    pub stale: bool,
+    pub error_code: Option<ErrorCode>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditorDraftDto {
+    pub vault_id: VaultId,
+    pub note_id: NoteId,
+    pub rel_path: String,
+    pub base_hash: String,
+    pub draft_seq: u64,
+    pub body: String,
+    pub updated_at: String,
 }

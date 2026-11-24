@@ -6,6 +6,7 @@ import type {
   BacklinkHit,
   BackupResult,
   BrokenLinkDto,
+  EditorDraftDto,
   ErrorCode,
   ErrorEnvelope,
   GraphSnapshotDto,
@@ -304,6 +305,51 @@ export function listTrashedNotes(
   vaultId: string,
 ): Promise<TrashedNoteSummary[]> {
   return invokeTyped<TrashedNoteSummary[]>("list_trashed_notes", { vaultId });
+}
+
+export function saveDraft(
+  vaultId: string,
+  noteId: string,
+  relPath: string,
+  baseHash: string,
+  draftSeq: number,
+  body: string,
+): Promise<EditorDraftDto> {
+  return invokeTyped<EditorDraftDto>("save_draft", {
+    vaultId,
+    noteId,
+    relPath,
+    baseHash,
+    draftSeq,
+    body,
+  });
+}
+
+export function getDraft(
+  vaultId: string,
+  noteId: string,
+): Promise<EditorDraftDto | null> {
+  return invokeTyped<EditorDraftDto | null>("get_draft", { vaultId, noteId });
+}
+
+export function listDrafts(vaultId: string): Promise<EditorDraftDto[]> {
+  return invokeTyped<EditorDraftDto[]>("list_drafts", { vaultId });
+}
+
+export function clearDraft(
+  vaultId: string,
+  noteId: string,
+  maxDraftSeq?: number,
+): Promise<boolean> {
+  return invokeTyped<boolean>("clear_draft", {
+    vaultId,
+    noteId,
+    maxDraftSeq: maxDraftSeq ?? null,
+  });
+}
+
+export function triggerReconcile(vaultId: string): Promise<boolean> {
+  return invokeTyped<boolean>("trigger_reconcile", { vaultId });
 }
 
 export function isTauriRuntime(): boolean {

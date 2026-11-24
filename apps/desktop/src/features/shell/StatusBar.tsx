@@ -16,7 +16,9 @@ interface StatusBarProps {
   activeTab: EditorTabState | null;
   isBusy: boolean;
   externalNotice: string | null;
+  staleWatcherMessage: string | null;
   errorEnvelope: ErrorEnvelope | null;
+  onRetrySync?: () => void;
   onDismissError: () => void;
   onDismissNotice: () => void;
 }
@@ -51,7 +53,9 @@ export function StatusBar({
   activeTab,
   isBusy,
   externalNotice,
+  staleWatcherMessage,
   errorEnvelope,
+  onRetrySync,
   onDismissError,
   onDismissNotice,
 }: StatusBarProps) {
@@ -97,6 +101,23 @@ export function StatusBar({
       </div>
 
       <div className="pb-status-group">
+        {staleWatcherMessage ? (
+          <span className="pb-status-pill is-warn" role="alert">
+            <AlertTriangle size={11} />
+            Index stale: {staleWatcherMessage}
+            {onRetrySync ? (
+              <button
+                type="button"
+                className="pb-btn pb-btn-sm"
+                style={{ height: 18, padding: "0 6px", fontSize: 11 }}
+                onClick={onRetrySync}
+              >
+                Retry Sync
+              </button>
+            ) : null}
+          </span>
+        ) : null}
+
         {externalNotice ? (
           <span className="pb-status-pill is-warn" role="status">
             {externalNotice}

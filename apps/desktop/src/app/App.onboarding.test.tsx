@@ -67,6 +67,25 @@ describe("App onboarding & Home/Vault navigation", () => {
     vi.spyOn(ipc, "listTrashedNotes").mockResolvedValue([]);
     vi.spyOn(ipc, "getNoteBacklinks").mockResolvedValue([]);
     vi.spyOn(ipc, "listRevisions").mockResolvedValue([]);
+    vi.spyOn(ipc, "getDraft").mockResolvedValue(null);
+    vi.spyOn(ipc, "saveDraft").mockImplementation(
+      async (vault_id, note_id, rel_path, base_hash, draft_seq, body) => ({
+        vault_id,
+        note_id,
+        rel_path,
+        base_hash,
+        draft_seq,
+        body,
+        updated_at: "2026-11-24T10:00:00Z",
+      }),
+    );
+    vi.spyOn(ipc, "clearDraft").mockResolvedValue(true);
+    vi.spyOn(ipc, "getVaultGraph").mockResolvedValue({
+      vault_id: VAULT_A.vault_id,
+      generation: 3,
+      nodes: [],
+      edges: [],
+    });
     vi.spyOn(ipc, "subscribeVaultReconciled").mockResolvedValue(() => {});
   });
 
