@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
-import type { AppHealthDto, ErrorEnvelope } from "../lib/contracts";
-import { fetchAppHealth, normalizeIpcError } from "../lib/ipc";
+import type { AppHealthDto, ErrorEnvelope, VaultSummary } from "../lib/contracts";
+import { fetchAppHealth, listVaults, normalizeIpcError } from "../lib/ipc";
 
 type LoadState =
   | { kind: "loading" }
-  | { kind: "ready"; health: AppHealthDto }
+  | { kind: "ready"; health: AppHealthDto; vaults: VaultSummary[] }
   | { kind: "error"; error: ErrorEnvelope };
 
 export function App() {
@@ -13,10 +13,10 @@ export function App() {
 
   useEffect(() => {
     let active = true;
-    fetchAppHealth().then(
-      (health) => {
+    Promise.all([fetchAppHealth(), listVaults()]).then(
+      ([health, vaults]) => {
         if (active) {
-          setState({ kind: "ready", health });
+          setState({ kind: "ready", health, vaults });
         }
       },
       (err: unknown) => {
@@ -39,7 +39,7 @@ export function App() {
     <main className="pb-shell">
       <header className="pb-header">
         <h1 className="pb-title">Personal Brain</h1>
-        <span className="pb-badge">Phase 2 Foundation</span>
+        <span className="pb-badge">Phase 3 Vault Engine</span>
       </header>
 
       <section className="pb-panel" aria-live="polite">
@@ -53,11 +53,7 @@ export function App() {
               Core health check failed ({state.error.code}):{" "}
               {state.error.message}
             </p>
-            <button
-              type="button"
-              className="pb-btn"
-              onClick={handleRetry}
-            >
+            <button type="button" className="pb-btn" onClick={handleRetry}>
               Retry
             </button>
           </div>
@@ -81,6 +77,10 @@ export function App() {
                 </dd>
               </div>
               <div className="pb-kv-row">
+                <dt>Registered vaults</dt>
+                <dd>{state.vaults.length}</dd>
+              </div>
+              <div className="pb-kv-row">
                 <dt>App data root</dt>
                 <dd>{state.health.paths.app_data_dir}</dd>
               </div>
@@ -93,11 +93,7 @@ export function App() {
                 <dd>{state.health.paths.vaults_dir}</dd>
               </div>
             </dl>
-            <button
-              type="button"
-              className="pb-btn"
-              onClick={handleRetry}
-            >
+            <button type="button" className="pb-btn" onClick={handleRetry}>
               Re-verify core
             </button>
           </>

@@ -36,12 +36,14 @@ fn rejects_traversal_ads_reserved_and_trailing_names() {
 
 #[cfg(windows)]
 #[test]
-fn denies_ntfs_junction_escape_and_hardlinks() {
+fn denies_ntfs_junction_dangling_junction_file_as_dir_and_hardlinks() {
     let sandbox = std::env::temp_dir().join(format!("pb-path-sec-{}", Uuid::new_v4()));
     let vault = sandbox.join("vault");
     let outside = sandbox.join("outside");
+    let dangling_target = sandbox.join("will_be_deleted");
     std::fs::create_dir_all(&vault).expect("create vault");
     std::fs::create_dir_all(&outside).expect("create outside");
+    std::fs::create_dir_all(&dangling_target).expect("create dangling target");
 
     let secret_outside = outside.join("secret.md");
     std::fs::write(&secret_outside, b"outside secret").expect("write outside file");
@@ -76,7 +78,35 @@ fn denies_ntfs_junction_escape_and_hardlinks() {
         .expect_err("write through junction must be denied");
     assert_eq!(j_write_err.code(), ErrorCode::AccessDenied);
 
-    // 3. Hardlinked file pointing outside vault must be denied (nNumberOfLinks > 1)
+    // 3. Dangling junction (target deleted after mklink /J) must still be denied on write
+    let dangling_junction = vault.join("dangling_link");
+    let d_status = Command::new("cmd")
+        .args([
+            "/C",
+            "mklink",
+            "/J",
+            &dangling_junction.to_string_lossy(),
+            &dangling_target.to_string_lossy(),
+        ])
+        .status()
+        .expect("run mklink /J for dangling");
+    assert!(d_status.success());
+    std::fs::remove_dir(&dangling_target).expect("delete target to make junction dangling");
+
+    let dj_write_err = resolve_guarded_target_for_write(&vault, "dangling_link/new.md")
+        .expect_err("write through dangling junction must be denied");
+    assert_eq!(dj_write_err.code(), ErrorCode::AccessDenied);
+
+    let dj_leaf_err = resolve_guarded_target_for_write(&vault, "dangling_link")
+        .expect_err("write directly over dangling junction must be denied");
+    assert_eq!(dj_leaf_err.code(), ErrorCode::AccessDenied);
+
+    // 4. Regular file used as an intermediate directory segment must be rejected
+    let file_as_dir_err = resolve_guarded_target_for_write(&vault, "normal.md/subnote.md")
+        .expect_err("regular file as intermediate dir must fail");
+    assert_eq!(file_as_dir_err.code(), ErrorCode::InvalidInput);
+
+    // 5. Hardlinked file pointing outside vault must be denied (nNumberOfLinks > 1)
     let hardlink = vault.join("hardlink.md");
     std::fs::hard_link(&secret_outside, &hardlink).expect("create hardlink");
 
@@ -88,9 +118,11 @@ fn denies_ntfs_junction_escape_and_hardlinks() {
         .expect_err("hardlinked file write must be denied");
     assert_eq!(hl_write_err.code(), ErrorCode::AccessDenied);
 
-    // Clean up junction before removing sandbox
     let _ = Command::new("cmd")
         .args(["/C", "rmdir", &junction.to_string_lossy()])
+        .status();
+    let _ = Command::new("cmd")
+        .args(["/C", "rmdir", &dangling_junction.to_string_lossy()])
         .status();
     let _ = std::fs::remove_dir_all(&sandbox);
 }

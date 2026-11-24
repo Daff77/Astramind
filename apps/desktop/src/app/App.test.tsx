@@ -8,7 +8,7 @@ describe("App foundation shell", () => {
     vi.restoreAllMocks();
   });
 
-  it("renders live core health data from typed IPC", async () => {
+  it("renders live core health and vault registry count from typed IPC", async () => {
     vi.spyOn(ipc, "fetchAppHealth").mockResolvedValue({
       app_name: "Personal Brain",
       core_version: "0.1.0",
@@ -20,11 +20,12 @@ describe("App foundation shell", () => {
         vaults_dir: "C:\\Users\\test\\AppData\\Local\\PersonalBrain\\vaults",
       },
       sqlite: {
-        sqlite_version: "3.49.0",
+        sqlite_version: "3.49.1",
         fts5_enabled: true,
         fts5_probe_hits: 1,
       },
     });
+    vi.spyOn(ipc, "listVaults").mockResolvedValue([]);
 
     render(<App />);
     expect(screen.getByText(/Checking Rust knowledge core/i)).toBeInTheDocument();
@@ -34,10 +35,10 @@ describe("App foundation shell", () => {
         screen.getByText(/Knowledge core online \(windows-x86_64\)/i),
       ).toBeInTheDocument();
     });
-    expect(screen.getByText(/3\.49\.0 \(FTS5 enabled\)/i)).toBeInTheDocument();
+    expect(screen.getByText(/3\.49\.1 \(FTS5 enabled\)/i)).toBeInTheDocument();
   });
 
-  it("renders structured ErrorEnvelope when IPC fails", async () => {
+  it("renders structured ErrorEnvelope and rejects unknown ErrorCodes", async () => {
     vi.spyOn(ipc, "fetchAppHealth").mockRejectedValue({
       code: "STATE_UNAVAILABLE",
       message: "database offline",
@@ -45,6 +46,7 @@ describe("App foundation shell", () => {
       operation_id: null,
       safe_details: null,
     });
+    vi.spyOn(ipc, "listVaults").mockResolvedValue([]);
 
     render(<App />);
     await waitFor(() => {
@@ -53,5 +55,8 @@ describe("App foundation shell", () => {
       ).toBeInTheDocument();
     });
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+
+    expect(ipc.parseErrorCode("CONFLICT")).toBe("CONFLICT");
+    expect(ipc.parseErrorCode("UNKNOWN_FAKE_CODE")).toBe("IO_FAILED");
   });
 });

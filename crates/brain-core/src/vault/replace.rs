@@ -83,7 +83,8 @@ pub fn safe_replace_note(
     let parent = target_path.parent().ok_or_else(|| {
         CoreError::InvalidInput("target path has no parent directory".to_string())
     })?;
-    fs::create_dir_all(parent).map_err(|err| CoreError::from_io("create note parent dir", &err))?;
+    fs::create_dir_all(parent)
+        .map_err(|err| CoreError::from_io_dir("create note parent dir", &err))?;
 
     let temp_name = format!(".pb-tmp-{}.tmp", Uuid::new_v4());
     let temp_path = parent.join(temp_name);
@@ -190,9 +191,8 @@ fn win_move_file_ex(src: &Path, dst: &Path) -> Result<(), CoreError> {
     } else {
         // SAFETY: reads thread-local last error set by `MoveFileExW`.
         let err = unsafe { GetLastError() };
-        Err(CoreError::IoFailed(format!(
-            "MoveFileExW failed with OS error {err}"
-        )))
+        let io_err = std::io::Error::from_raw_os_error(err as i32);
+        Err(CoreError::from_io("MoveFileExW replace note", &io_err))
     }
 }
 
@@ -220,9 +220,8 @@ fn win_replace_file(replaced: &Path, replacement: &Path) -> Result<(), CoreError
     } else {
         // SAFETY: reads thread-local last error set by `ReplaceFileW`.
         let err = unsafe { GetLastError() };
-        Err(CoreError::IoFailed(format!(
-            "ReplaceFileW failed with OS error {err}"
-        )))
+        let io_err = std::io::Error::from_raw_os_error(err as i32);
+        Err(CoreError::from_io("ReplaceFileW replace note", &io_err))
     }
 }
 

@@ -5,7 +5,7 @@
 | Phase | Phase 2 — Project Foundation (`PB-006`–`PB-009`) |
 | Date | 2026-11-24 |
 | Baseline | Approved Phase 1 (`a48dace`), `ADR-0001`–`ADR-0006` & `B-5` spec revisions (`49078a7`) |
-| Status | `IN_REVIEW` — awaiting owner sign-off at Phase 2 quality gate |
+| Status | `APPROVED` — Owner authorized Phase 3 execution |
 
 ---
 
@@ -107,4 +107,4 @@ An independent read-only `research` subagent (`630811f8-d6c9-4585-9dbb-7aec660a0
 
 | Role | Decision (`Approve` \| `Approve with changes` \| `Reject`) | Date | Notes |
 |---|---|---|---|
-| Product owner | | | |
+| Product owner | Approve | 2026-11-24 | Owner approved Phase 2 and authorized Phase 3 |

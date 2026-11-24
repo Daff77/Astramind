@@ -102,6 +102,32 @@ impl CoreError {
     pub fn from_io(context: &str, err: &std::io::Error) -> Self {
         match err.kind() {
             std::io::ErrorKind::NotFound => Self::NoteNotFound(format!("{context}: not found")),
+            _ => Self::from_io_common(context, err),
+        }
+    }
+
+    #[must_use]
+    pub fn from_io_dir(context: &str, err: &std::io::Error) -> Self {
+        match err.kind() {
+            std::io::ErrorKind::NotFound => {
+                Self::IoFailed(format!("{context}: parent directory not found"))
+            }
+            _ => Self::from_io_common(context, err),
+        }
+    }
+
+    #[must_use]
+    pub fn from_io_vault(context: &str, err: &std::io::Error) -> Self {
+        match err.kind() {
+            std::io::ErrorKind::NotFound => {
+                Self::VaultUnavailable(format!("{context}: vault root not found"))
+            }
+            _ => Self::from_io_common(context, err),
+        }
+    }
+
+    fn from_io_common(context: &str, err: &std::io::Error) -> Self {
+        match err.kind() {
             std::io::ErrorKind::PermissionDenied => {
                 Self::AccessDenied(format!("{context}: access denied"))
             }

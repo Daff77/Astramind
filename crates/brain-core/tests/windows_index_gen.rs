@@ -54,5 +54,13 @@ fn generation_named_index_avoids_windows_sharing_violation() {
     std::fs::remove_file(AppPathsSpec::index_file_in(&vault_dir, 1))
         .expect("unlink old index-1.sqlite after reader drops");
 
+    // Temp-staged exclusive publish must fail with Conflict if generation already exists
+    let dup = write_generation_index(&vault_dir, 2, &[("note-3", "Gamma", "Should fail")]);
+    assert!(matches!(
+        dup.expect_err("duplicate generation must fail closed")
+            .code(),
+        brain_core::domain::errors::ErrorCode::Conflict
+    ));
+
     let _ = std::fs::remove_dir_all(&vault_dir);
 }

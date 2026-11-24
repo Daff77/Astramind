@@ -1,5 +1,51 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AppHealthDto, ErrorEnvelope } from "./contracts";
+import type {
+  AppHealthDto,
+  BacklinkHit,
+  BackupResult,
+  BrokenLinkDto,
+  ErrorCode,
+  ErrorEnvelope,
+  GraphSnapshotDto,
+  MovePlan,
+  MutationResult,
+  NoteSnapshot,
+  NoteSummary,
+  Page,
+  ReconcileSummary,
+  RestoreResult,
+  SearchFilters,
+  SearchHit,
+  VaultOpenReport,
+  VaultSummary,
+} from "./contracts";
+
+const VALID_ERROR_CODES = new Set<ErrorCode>([
+  "INVALID_INPUT",
+  "VAULT_UNAVAILABLE",
+  "ACCESS_DENIED",
+  "NOTE_NOT_FOUND",
+  "AMBIGUOUS_LINK",
+  "CONFLICT",
+  "BUSY",
+  "DISK_FULL",
+  "IO_FAILED",
+  "PARSE_WARNING",
+  "INDEX_STALE",
+  "STATE_UNAVAILABLE",
+  "RECOVERY_REQUIRED",
+  "PROVIDER_UNAVAILABLE",
+  "CONSENT_REQUIRED",
+  "CANCELLED",
+  "LIMIT_EXCEEDED",
+]);
+
+export function parseErrorCode(raw: unknown): ErrorCode {
+  if (typeof raw === "string" && VALID_ERROR_CODES.has(raw as ErrorCode)) {
+    return raw as ErrorCode;
+  }
+  return "IO_FAILED";
+}
 
 export function normalizeIpcError(err: unknown): ErrorEnvelope {
   if (
@@ -10,10 +56,13 @@ export function normalizeIpcError(err: unknown): ErrorEnvelope {
   ) {
     const candidate = err as Partial<ErrorEnvelope>;
     return {
-      code: candidate.code ?? "IO_FAILED",
+      code: parseErrorCode(candidate.code),
       message: String(candidate.message ?? "Unknown core error"),
       retryable: Boolean(candidate.retryable),
-      operation_id: candidate.operation_id ?? null,
+      operation_id:
+        typeof candidate.operation_id === "string"
+          ? candidate.operation_id
+          : null,
       safe_details: candidate.safe_details ?? null,
     };
   }
@@ -26,10 +75,204 @@ export function normalizeIpcError(err: unknown): ErrorEnvelope {
   };
 }
 
-export async function fetchAppHealth(): Promise<AppHealthDto> {
+async function invokeTyped<T>(
+  command: string,
+  args?: Record<string, unknown>,
+): Promise<T> {
   try {
-    return await invoke<AppHealthDto>("app_health");
+    return await invoke<T>(command, args);
   } catch (err) {
     throw normalizeIpcError(err);
   }
+}
+
+export function fetchAppHealth(): Promise<AppHealthDto> {
+  return invokeTyped<AppHealthDto>("app_health");
+}
+
+export function listVaults(): Promise<VaultSummary[]> {
+  return invokeTyped<VaultSummary[]>("list_vaults");
+}
+
+export function createVault(
+  selectedRoot: string,
+  displayName?: string,
+): Promise<VaultOpenReport> {
+  return invokeTyped<VaultOpenReport>("create_vault", {
+    selectedRoot,
+    displayName: displayName ?? null,
+  });
+}
+
+export function openVault(selectedRoot: string): Promise<VaultOpenReport> {
+  return invokeTyped<VaultOpenReport>("open_vault", { selectedRoot });
+}
+
+export function listNotes(vaultId: string): Promise<NoteSummary[]> {
+  return invokeTyped<NoteSummary[]>("list_notes", { vaultId });
+}
+
+export function readNote(
+  vaultId: string,
+  noteId: string,
+): Promise<NoteSnapshot> {
+  return invokeTyped<NoteSnapshot>("read_note", { vaultId, noteId });
+}
+
+export function createNote(
+  vaultId: string,
+  relPath: string,
+  body: string,
+  requestId: string,
+): Promise<MutationResult> {
+  return invokeTyped<MutationResult>("create_note", {
+    vaultId,
+    relPath,
+    body,
+    requestId,
+  });
+}
+
+export function saveNote(
+  vaultId: string,
+  noteId: string,
+  expectedHash: string,
+  body: string,
+  requestId: string,
+): Promise<MutationResult> {
+  return invokeTyped<MutationResult>("save_note", {
+    vaultId,
+    noteId,
+    expectedHash,
+    body,
+    requestId,
+  });
+}
+
+export function previewMove(
+  vaultId: string,
+  noteId: string,
+  destination: string,
+): Promise<MovePlan> {
+  return invokeTyped<MovePlan>("preview_move", {
+    vaultId,
+    noteId,
+    destination,
+  });
+}
+
+export function moveNote(
+  plan: MovePlan,
+  expectedHash: string,
+  requestId: string,
+): Promise<MutationResult> {
+  return invokeTyped<MutationResult>("move_note", {
+    plan,
+    expectedHash,
+    requestId,
+  });
+}
+
+export function trashNote(
+  vaultId: string,
+  noteId: string,
+  expectedHash: string,
+  requestId: string,
+): Promise<MutationResult> {
+  return invokeTyped<MutationResult>("trash_note", {
+    vaultId,
+    noteId,
+    expectedHash,
+    requestId,
+  });
+}
+
+export function searchVaultNotes(
+  vaultId: string,
+  query: string,
+  filters: SearchFilters = {},
+  limit?: number,
+  cursor?: string,
+): Promise<Page<SearchHit>> {
+  return invokeTyped<Page<SearchHit>>("search_vault_notes", {
+    vaultId,
+    query,
+    filters,
+    limit: limit ?? null,
+    cursor: cursor ?? null,
+  });
+}
+
+export function getNoteBacklinks(
+  vaultId: string,
+  noteId: string,
+): Promise<BacklinkHit[]> {
+  return invokeTyped<BacklinkHit[]>("get_note_backlinks", { vaultId, noteId });
+}
+
+export function restoreTrashedNote(
+  vaultId: string,
+  noteId: string,
+  requestId: string,
+): Promise<MutationResult> {
+  return invokeTyped<MutationResult>("restore_trashed_note", {
+    vaultId,
+    noteId,
+    requestId,
+  });
+}
+
+export function restoreRevision(
+  vaultId: string,
+  revisionId: string,
+  expectedCurrentHash: string,
+  requestId: string,
+): Promise<MutationResult> {
+  return invokeTyped<MutationResult>("restore_revision", {
+    vaultId,
+    revisionId,
+    expectedCurrentHash,
+    requestId,
+  });
+}
+
+export function getVaultBrokenLinks(
+  vaultId: string,
+): Promise<BrokenLinkDto[]> {
+  return invokeTyped<BrokenLinkDto[]>("get_vault_broken_links", { vaultId });
+}
+
+export function getVaultGraph(vaultId: string): Promise<GraphSnapshotDto> {
+  return invokeTyped<GraphSnapshotDto>("get_vault_graph", { vaultId });
+}
+
+export function rebuildVaultIndex(vaultId: string): Promise<ReconcileSummary> {
+  return invokeTyped<ReconcileSummary>("rebuild_vault_index", { vaultId });
+}
+
+export function createVaultBackup(
+  vaultId: string,
+  destination: string,
+): Promise<BackupResult> {
+  return invokeTyped<BackupResult>("create_vault_backup", {
+    vaultId,
+    destination,
+  });
+}
+
+export function restoreVaultBackup(
+  backupDir: string,
+  destination: string,
+): Promise<RestoreResult> {
+  return invokeTyped<RestoreResult>("restore_vault_backup", {
+    backupDir,
+    destination,
+  });
+}
+
+export function exportVaultFiles(
+  vaultId: string,
+  destination: string,
+): Promise<number> {
+  return invokeTyped<number>("export_vault_files", { vaultId, destination });
 }

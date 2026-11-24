@@ -15,7 +15,7 @@ impl VaultLock {
     pub fn acquire(lock_path: &Path, timeout: Duration) -> Result<Self, CoreError> {
         if let Some(parent) = lock_path.parent() {
             std::fs::create_dir_all(parent)
-                .map_err(|err| CoreError::from_io("create lock directory", &err))?;
+                .map_err(|err| CoreError::from_io_dir("create lock directory", &err))?;
         }
 
         let file = OpenOptions::new()

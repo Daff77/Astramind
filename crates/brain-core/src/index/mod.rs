@@ -1,8 +1,11 @@
+pub mod store;
+
 use crate::domain::errors::CoreError;
 use crate::domain::types::SqliteHealthDto;
 use crate::paths::AppPathsSpec;
 use rusqlite::{params, Connection, OpenFlags};
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 /// Verifies that the bundled SQLite engine compiles with FTS5 enabled and executes
 /// parameterized queries cleanly.
@@ -44,57 +47,135 @@ pub fn probe_sqlite_fts5() -> Result<SqliteHealthDto, CoreError> {
     })
 }
 
-/// Quotes arbitrary user input as a literal FTS5 phrase token to prevent FTS syntax injection.
+/// Quotes arbitrary user input as literal FTS5 phrase tokens to prevent FTS syntax injection.
 #[must_use]
 pub fn literal_fts_query(raw: &str) -> String {
-    let escaped = raw.replace('"', "\"\"");
-    format!("\"{escaped}\"")
+    let tokens: Vec<String> = raw
+        .split_whitespace()
+        .filter(|t| !t.is_empty())
+        .map(|tok| {
+            let escaped = tok.replace('"', "\"\"");
+            format!("\"{escaped}\"")
+        })
+        .collect();
+    if tokens.is_empty() {
+        String::new()
+    } else {
+        tokens.join(" ")
+    }
 }
 
-/// Builds a generation-named derived index (`index-<gen>.sqlite`) per `ADR-0005` (`SC-14`)
-/// so active readers can keep reading the prior snapshot until generation switchover.
+/// Stages a generation-named derived index (`index-<gen>.sqlite`) via a temp file and
+/// publishes it without overwriting an existing generation (`MoveFileExW` without `REPLACE_EXISTING`).
 pub fn write_generation_index(
     vault_dir: &Path,
     generation: u64,
     docs: &[(&str, &str, &str)],
 ) -> Result<PathBuf, CoreError> {
     std::fs::create_dir_all(vault_dir)
-        .map_err(|err| CoreError::from_io("create index directory", &err))?;
-    let path = AppPathsSpec::index_file_in(vault_dir, generation);
-    let mut conn = Connection::open(&path)
-        .map_err(|err| CoreError::IoFailed(format!("open generation index: {err}")))?;
-    conn.execute_batch(
-        "PRAGMA journal_mode=WAL;
-         PRAGMA foreign_keys=ON;
-         CREATE TABLE IF NOT EXISTS notes (
-             row_id INTEGER PRIMARY KEY,
-             note_id TEXT NOT NULL UNIQUE,
-             title TEXT NOT NULL,
-             body TEXT NOT NULL
-         );
-         CREATE VIRTUAL TABLE IF NOT EXISTS note_fts USING fts5(title, body, tokenize='unicode61');",
-    )
-    .map_err(|err| CoreError::IoFailed(format!("init generation index schema: {err}")))?;
-
-    let tx = conn
-        .transaction()
-        .map_err(|err| CoreError::IoFailed(format!("begin index tx: {err}")))?;
-    for (note_id, title, body) in docs {
-        tx.execute(
-            "INSERT INTO notes(note_id, title, body) VALUES (?1, ?2, ?3)",
-            params![note_id, title, body],
-        )
-        .map_err(|err| CoreError::IoFailed(format!("insert note row: {err}")))?;
-        let row_id = tx.last_insert_rowid();
-        tx.execute(
-            "INSERT INTO note_fts(rowid, title, body) VALUES (?1, ?2, ?3)",
-            params![row_id, title, body],
-        )
-        .map_err(|err| CoreError::IoFailed(format!("insert fts row: {err}")))?;
+        .map_err(|err| CoreError::from_io_dir("create index directory", &err))?;
+    let target_path = AppPathsSpec::index_file_in(vault_dir, generation);
+    if target_path.exists() {
+        return Err(CoreError::Conflict(format!(
+            "index generation {generation} already exists"
+        )));
     }
-    tx.commit()
-        .map_err(|err| CoreError::IoFailed(format!("commit generation index: {err}")))?;
-    Ok(path)
+    let temp_path = vault_dir.join(format!("index-{generation}.sqlite.tmp-{}", Uuid::new_v4()));
+
+    let build_res = (|| -> Result<(), CoreError> {
+        let mut conn = Connection::open(&temp_path)
+            .map_err(|err| CoreError::IoFailed(format!("open staged index: {err}")))?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=DELETE;
+             PRAGMA synchronous=NORMAL;
+             PRAGMA foreign_keys=ON;
+             CREATE TABLE notes (
+                 row_id INTEGER PRIMARY KEY,
+                 note_id TEXT NOT NULL UNIQUE,
+                 title TEXT NOT NULL,
+                 body TEXT NOT NULL
+             );
+             CREATE VIRTUAL TABLE note_fts USING fts5(title, body, tokenize='unicode61');",
+        )
+        .map_err(|err| CoreError::IoFailed(format!("init generation index schema: {err}")))?;
+
+        let tx = conn
+            .transaction()
+            .map_err(|err| CoreError::IoFailed(format!("begin index tx: {err}")))?;
+        for (note_id, title, body) in docs {
+            tx.execute(
+                "INSERT INTO notes(note_id, title, body) VALUES (?1, ?2, ?3)",
+                params![note_id, title, body],
+            )
+            .map_err(|err| CoreError::IoFailed(format!("insert note row: {err}")))?;
+            let row_id = tx.last_insert_rowid();
+            tx.execute(
+                "INSERT INTO note_fts(rowid, title, body) VALUES (?1, ?2, ?3)",
+                params![row_id, title, body],
+            )
+            .map_err(|err| CoreError::IoFailed(format!("insert fts row: {err}")))?;
+        }
+        tx.commit()
+            .map_err(|err| CoreError::IoFailed(format!("commit generation index: {err}")))?;
+        Ok(())
+    })();
+
+    if let Err(err) = build_res {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(err);
+    }
+
+    publish_staged_file_exclusive(&temp_path, &target_path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&temp_path);
+    })?;
+    Ok(target_path)
+}
+
+pub(crate) fn publish_staged_file_exclusive(src: &Path, dst: &Path) -> Result<(), CoreError> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::GetLastError;
+        use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+
+        let src_w: Vec<u16> = src
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let dst_w: Vec<u16> = dst
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: `src_w` and `dst_w` are null-terminated UTF-16 buffers; omitting
+        // `MOVEFILE_REPLACE_EXISTING` enforces fail-closed non-overwrite publish.
+        let ok = unsafe { MoveFileExW(src_w.as_ptr(), dst_w.as_ptr(), MOVEFILE_WRITE_THROUGH) };
+        if ok != 0 {
+            Ok(())
+        } else {
+            // SAFETY: reads thread-local Win32 error set by `MoveFileExW`.
+            let err = unsafe { GetLastError() };
+            if err == 183 || err == 80 {
+                Err(CoreError::Conflict(
+                    "staged destination file already exists".to_string(),
+                ))
+            } else {
+                Err(CoreError::IoFailed(format!(
+                    "MoveFileExW exclusive publish failed with OS error {err}"
+                )))
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if dst.exists() {
+            return Err(CoreError::Conflict(
+                "staged destination file already exists".to_string(),
+            ));
+        }
+        std::fs::rename(src, dst).map_err(|err| CoreError::from_io_dir("publish index", &err))
+    }
 }
 
 pub fn open_readonly_generation_index(index_path: &Path) -> Result<Connection, CoreError> {
@@ -110,6 +191,9 @@ pub fn query_generation_index(
     raw_query: &str,
 ) -> Result<Vec<String>, CoreError> {
     let literal = literal_fts_query(raw_query);
+    if literal.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut stmt = conn
         .prepare(
             "SELECT n.note_id

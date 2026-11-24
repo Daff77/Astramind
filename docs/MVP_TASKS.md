@@ -162,16 +162,16 @@ Initial state all 30 TODO; docs drafted, review pending. Update in repository on
 
 | Task | Status | Task | Status | Task | Status |
 |---|---|---|---|---|---|
-| PB-001 | DONE | PB-011 | TODO | PB-021 | TODO |
-| PB-002 | DONE | PB-012 | TODO | PB-022 | TODO |
-| PB-003 | DONE | PB-013 | TODO | PB-023 | TODO |
-| PB-004 | DONE | PB-014 | TODO | PB-024 | TODO |
+| PB-001 | DONE | PB-011 | DONE | PB-021 | TODO |
+| PB-002 | DONE | PB-012 | DONE | PB-022 | TODO |
+| PB-003 | DONE | PB-013 | DONE | PB-023 | TODO |
+| PB-004 | DONE | PB-014 | DONE | PB-024 | TODO |
 | PB-005 | DONE | PB-015 | TODO | PB-025 | TODO |
 | PB-006 | DONE | PB-016 | TODO | PB-026 | TODO |
 | PB-007 | DONE | PB-017 | TODO | PB-027 | TODO |
 | PB-008 | DONE | PB-018 | TODO | PB-028 | TODO |
 | PB-009 | DONE | PB-019 | TODO | PB-029 | TODO |
-| PB-010 | TODO | PB-020 | TODO | PB-030 | TODO |
+| PB-010 | DONE | PB-020 | TODO | PB-030 | TODO |
 
 ### Per-task evidence template
 
