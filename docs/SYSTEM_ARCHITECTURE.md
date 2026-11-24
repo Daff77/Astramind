@@ -36,7 +36,7 @@ Deployment paths (illustrative, obtained through OS path APIs):
 - User-selected vault, e.g. `D:\PersonalBrain\Vault`; no requirement for a prescribed folder layout or administrative privilege.
 - Per-user local application data: `PersonalBrain/registry.sqlite`, `vaults/<vault_id>/state.sqlite`, `index.sqlite`, recovery/blobs, settings. Resolve through platform APIs, not hardcoded usernames.
 - Desktop and MCP executables from Windows installer; installer exposes MCP executable path and client setup instructions, never silently edits agent config.
-- Backup destination chosen by user; cannot be nested in the indexed vault. API credentials via OS-backed credential storage; do not include credentials in backup.
+- Backup destination chosen by user; cannot be nested in the indexed vault, inside `%LOCALAPPDATA%\PersonalBrain`, or an ancestor directory containing the vault. API credentials via OS-backed credential storage; do not include credentials in backup.
 - Windows filesystem is baseline. WSL tools may reach a Windows drive through `/mnt/...`, but direct Linux agent access, cross-runtime locking and watchers need separate qualification. Recommend Windows-native MCP process for MVP; do not promise WSL integration until tested.
 
 ## 3. Repository and ownership
@@ -87,19 +87,28 @@ Dependency direction: `domain` has no UI, DB or protocol dependency; storage and
 Identifiers and DTOs in DATA_SCHEMA.md. All operations return typed result or stable error code. No arbitrary absolute paths from MCP. Desktop file picker is trusted UI input only for selecting roots, subsequently validated in core.
 
 ```text
+create_vault(desktop_actor, selected_root, display_name) -> VaultSummary
 open_vault(selected_root) -> VaultSummary
+export_vault(desktop_actor, vault_id, destination) -> JobId
 list_notes(vault_id, filter, page) -> Page<NoteSummary>
 read_note(actor, vault_id, note_id) -> NoteSnapshot
 create_note(desktop_actor, vault_id, rel_path, body, request_id) -> MutationResult
-save_note(desktop_actor, note_id, expected_hash, body, request_id) -> MutationResult
-preview_move(note_id, destination) -> MovePlan
-move_note(desktop_actor, plan, expected_hash, request_id) -> MutationResult
-trash_note(desktop_actor, note_id, expected_hash, request_id) -> MutationResult
+save_note(desktop_actor, vault_id, note_id, expected_hash, body, request_id) -> MutationResult
+preview_move(vault_id, note_id, destination) -> MovePlan
+move_note(desktop_actor, vault_id, plan, expected_hash, request_id) -> MutationResult
+trash_note(desktop_actor, vault_id, note_id, expected_hash, request_id) -> MutationResult
+restore_trashed_note(desktop_actor, vault_id, note_id, request_id) -> MutationResult
+set_note_verification(desktop_actor, vault_id, note_id, verification, expected_hash, request_id) -> NoteStatus
+set_pinned(desktop_actor, vault_id, note_id, pinned) -> NoteStatus
+list_grants(desktop_actor, vault_id) -> Vec<AgentGrant>
+create_grant(desktop_actor, vault_id, grant_input) -> AgentGrant
+update_grant(desktop_actor, grant_id, grant_patch) -> AgentGrant
+revoke_grant(desktop_actor, grant_id) -> AgentGrant
 search(actor, vault_id, query, filters, page) -> Page<SearchHit>
 get_graph(desktop_actor, vault_id, filters) -> GraphSnapshot
 propose_memory(agent_actor, proposal_input, request_id) -> ProposalSummary
-review_proposal(desktop_actor, proposal_id, proposal_version, decision, request_id) -> ReviewResult
-restore_revision(desktop_actor, revision_id, expected_current_hash, request_id) -> MutationResult
+review_proposal(desktop_actor, vault_id, proposal_id, proposal_version, decision, edited_body?, verification?, request_id) -> ReviewResult
+restore_revision(desktop_actor, vault_id, revision_id, expected_current_hash, request_id) -> MutationResult
 rebuild_index(desktop_actor, vault_id) -> JobId
 create_backup(desktop_actor, vault_id, destination) -> JobId
 restore_backup(desktop_actor, backup_id, destination, plan) -> JobId
@@ -132,7 +141,7 @@ Graph DTO uses `note_id` nodes and resolved explicit links; graph revision = ind
 
 ### 7.1 Coordination
 
-One per-vault named OS mutex (or verified equivalent cross-process primitive) derived from registry vault ID; lock path/identity not arbitrary input. All cooperating writers and backup snapshot use it, including state mutation, mapping, index generation commits and proposal review. Lock order: vault mutex → short state transaction → index transaction (never hold both DB transactions while doing provider calls). Timeouts return `BUSY`; abandoned lock triggers journal recovery and reconcile before accepting writes. SQLite WAL, foreign keys, bounded busy timeout, migration under exclusive coordination. UI calls do not block rendering; multiple readers use snapshots. Desktop and MCP must share same OS user registry and vault ID; avoid duplicate registrations using canonical root identity. Index data can lag; state is authoritative for governance.
+One per-vault OS file lock (`LockFileEx` on `%LOCALAPPDATA%\PersonalBrain\vaults\<vault_id>\vault.lock`, per `ADR-0001`) derived from registry vault ID; lock path/identity not arbitrary input. All cooperating writers and backup snapshot use it, including state mutation, mapping, index generation commits and proposal review. Lock order: vault lock → short state transaction → index generation commit (never hold both DB transactions while doing provider calls). Timeouts return `BUSY`; abandoned lock triggers journal recovery and reconcile before accepting writes. SQLite WAL, foreign keys, bounded busy timeout, migration under exclusive coordination. UI calls do not block rendering; multiple readers use snapshots against generation-named `index-<gen>.sqlite` files. Desktop and MCP must share same OS user registry and vault ID; avoid duplicate registrations using canonical root identity. Index data can lag; state is authoritative for governance.
 
 External editors do not honor this lock. Hash compare on open/commit, guarded Windows handles and sharing/replace policy to reduce TOCTOU; recheck identity/content immediately before replacement and verify result. Test actual NTFS behavior (including competing editors, junction swaps, and replacement handles) before declaring AC-016. No guarantee against arbitrary uncooperative processes writing outside the app; if safe replacement/validation cannot be established, return conflict, preserve attempted edit as recovery copy, and do not overwrite. Do not support network/sync-drive concurrency as qualified MVP unless tested; warn about unsupported locations. Review platform-specific file replace and flush semantics during PB-010/PB-013.
 
@@ -160,7 +169,7 @@ Prepare includes a durable preimage, postimage and unique operation/request ID; 
 
 ### 7.3 Backup/restore
 
-Before risky migration or on user request, capture vault notes/attachments, state DB consistent snapshot (SQLite backup API or equivalent verified method), referenced blobs, registry/settings subset, manifest with hashes and versions. Index optional; omit and rebuild by default. Capture under cooperating writer mutex; external edits can race, therefore compare inventory/hashes before and after and retry/fail if inconsistent. Refuse unsafe paths, missing blobs, invalid manifest; stage to temp and publish complete marker only after verification. Restore default to new folder/registry, verify before switching active vault, disable restored agent grants pending explicit re-authorization, exclude credentials. Preserve original until explicit confirmation. Retention policy in DATA_SCHEMA; clear delete/backup implications. State corruption requires restore/read-only mode; never replace state with blank DB silently.
+Before risky migration or on user request, capture vault notes/attachments, state DB consistent snapshot (SQLite backup API or equivalent verified method), referenced blobs, registry/settings subset, manifest with hashes and versions. Index optional; omit and rebuild by default. Capture under cooperating writer lock and refuse `create_backup` while `prepared` or `recovery_required` journal rows exist; external edits can race, therefore compare inventory/hashes before and after and retry/fail if inconsistent. Refuse unsafe paths (including destinations inside vault, inside `%LOCALAPPDATA%\PersonalBrain`, or vault ancestors), missing blobs, invalid manifest; stage to temp and publish complete marker only after verification. Restore default to new folder/registry; restore-alongside generates a new `vault_id` (recording old→new mapping), merges a new `registry.sqlite` entry, verifies before switching active vault, disables restored agent grants pending explicit re-authorization, excludes credentials. Preserve original until explicit confirmation. Retention policy in DATA_SCHEMA; clear delete/backup implications. State corruption requires restore/read-only mode; never replace state with blank DB silently.
 
 ## 8. MCP and trust boundaries
 
@@ -171,13 +180,13 @@ Transport: local stdio, one process per configured grant; JSON-RPC/MCP handled b
 | list_vaults | none | scoped vault ID/name only | read |
 | search_memory | vault_id, query, folder/tag filters, limit, cursor | bounded hits + sources + generation | read |
 | read_note | vault_id, note_id, optional start_line/max_lines | excerpt, hash, source, verification | read |
-| get_project_context | vault_id, project folder ID/path, query?, max_chars | bounded source-backed context | read |
+| get_project_context | vault_id, project_rel_path, query?, max_chars | bounded source-backed context | read |
 | get_related_notes | vault_id, note_id, limit | scoped explicit links/backlinks | read |
-| propose_memory | vault_id, action, target/base_hash or new relative path, proposed text, reason, sources, request_id | proposal ID/status only | propose + read target scope |
-| list_pending_changes | vault_id, cursor | caller's own proposal metadata | propose |
+| propose_memory | vault_id, action, target/base_hash or new_rel_path, proposed_text, reason, sources, request_id | proposal ID/status only | propose + read target scope |
+| list_pending_changes | vault_id, cursor | caller's own proposal metadata (filtered by current scope) | propose |
 | get_memory_proposal | vault_id, proposal_id | caller-owned proposal details, still scoped | propose |
 
-Read default limit 20 max 50 hits, max 8 KiB per excerpt, context max 32 KiB, proposed text max 64 KiB (configurable hard ceilings by design review); validate UTF-8 and schema, paginate, reject oversized input. No absolute path accepted; no full vault export tool. Source includes note_id, relative path, hash, line range; external source claim is labeled agent-asserted. Text is untrusted data: escape/sanitize renderer, separate tool outputs from trusted instructions, no execution. Even correctly retrieved notes can contain injection; client may still follow them, so no privileged mutation tools. External AI clients can transfer tool results to their own provider; disclose before granting access, app cannot control downstream retention.
+Read default limit 20 max 50 hits, max 8 KiB per excerpt, context max 32 KiB, proposed text max 64 KiB (configurable hard ceilings by design review); validate UTF-8 and schema, paginate, reject oversized input. For `propose_memory(create)`, `new_rel_path` must fall inside `grant_scopes`, use `.md` extension, and exclude `.obsidian`/`.git`/app artifacts; out-of-scope source/target `note_id`s must return an error indistinguishable from `NOTE_NOT_FOUND`. Reject proposals setting `personal_brain_id`, `personal_brain.verification`, or `verified_at` (`INVALID_INPUT`). No absolute path accepted; no full vault export tool. Source includes note_id, relative path, hash, line range; external source claim is labeled agent-asserted. Text is untrusted data: escape/sanitize renderer, separate tool outputs from trusted instructions, no execution. Even correctly retrieved notes can contain injection; client may still follow them, so no privileged mutation tools. External AI clients can transfer tool results to their own provider; disclose before granting access, app cannot control downstream retention.
 
 ## 9. AI Chat and privacy (phase 7)
 
@@ -186,7 +195,7 @@ Provider interface: `generate(request, cancel_token) -> stream events` with allo
 ## 10. Security design and verification
 
 - Filesystem: canonical root, reject absolute/UNC/device paths in relative input, `..`, alternate data streams, reserved names, trailing dots/spaces, case-collision, symlink/junction/reparse traversal, hardlinked notes for mutation/agent read unless explicitly qualified. Validate using Windows handle identity/final path, not string prefix alone; deny escapes at every hop and race tests. Fail closed on validation error. Restrict regular `.md` read for MCP; attachments not included automatically.
-- Tauri: minimal capabilities per window, no generic FS/shell/exec commands, restrictive CSP, no remote page in privileged window. Sanitize Markdown HTML and links, block scripts/iframes/remote images by default, external URL opens only after scheme validation/user action. No model-supplied command execution.
+- Tauri: minimal capabilities per window, no generic FS/shell/exec commands, restrictive CSP, no remote page in privileged window. Sanitize Markdown HTML and links, block scripts/iframes/remote images/`file://`/UNC (`\\`)/drive-absolute links by default, serve local attachments only via a core-served scoped protocol validating vault-relative paths (no broad Tauri `assetProtocol`), external URL opens only after scheme validation/user action. No model-supplied command execution.
 - Data: app-data ACL for current user; no promise of encryption at rest. OS disk encryption recommended if required. Redact logs, no raw queries/notes/secrets by default. Limit request size, CPU, concurrency and retries; timeout/cancel expensive work.
 - Recovery: test corrupted index vs corrupted state independently, power/crash injection at journal transitions, full disk, access denied, concurrent processes, external edits, backup/restore, symlink/junction swap, revoked grant, fake actor and stale proposal. All critical failures block release.
 - Dependency management: pin lockfiles; review licenses, security advisories, maintenance status before adoption; record decisions. No telemetry by default.
