@@ -332,10 +332,11 @@ pub fn get_graph(paths: &AppPathsSpec, vault_id: &VaultId) -> Result<GraphSnapsh
                 .filter(|_| rel_path.contains('/'))
                 .unwrap_or("")
                 .to_string();
-            let (verification, origin) = status_map
-                .get(&id)
-                .copied()
-                .unwrap_or((VerificationStatus::Unverified, NoteOrigin::Imported));
+            let (verification, origin, pinned) = status_map.get(&id).copied().unwrap_or((
+                VerificationStatus::Unverified,
+                NoteOrigin::Imported,
+                false,
+            ));
             let parse_status = match parse_s.as_str() {
                 "ok" => ParseStatus::Ok,
                 "warning" => ParseStatus::Warning,
@@ -355,6 +356,7 @@ pub fn get_graph(paths: &AppPathsSpec, vault_id: &VaultId) -> Result<GraphSnapsh
                 verification,
                 incoming_count,
                 outgoing_count,
+                pinned,
             });
         }
     }
@@ -379,10 +381,10 @@ pub fn get_graph(paths: &AppPathsSpec, vault_id: &VaultId) -> Result<GraphSnapsh
 
 fn load_note_state_map(
     state: &VaultStateStore,
-) -> Result<HashMap<NoteId, (VerificationStatus, NoteOrigin)>, CoreError> {
+) -> Result<HashMap<NoteId, (VerificationStatus, NoteOrigin, bool)>, CoreError> {
     let mut map = HashMap::new();
     for row in state.list_all_identities()? {
-        map.insert(row.note_id, (row.verification, row.origin));
+        map.insert(row.note_id, (row.verification, row.origin, row.pinned));
     }
     Ok(map)
 }

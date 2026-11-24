@@ -9,33 +9,36 @@ import type {
 } from "../../lib/contracts";
 
 export const CLUSTER_PALETTE = [
-  "#60a5fa", // Sapphire Blue
-  "#2dd4bf", // Celestial Teal
-  "#f59e0b", // Stellar Amber
-  "#a78bfa", // Nebula Violet
-  "#34d399", // Emerald Mint
-  "#f472b6", // Cosmic Rose
-  "#38bdf8", // Ion Cyan
-  "#eab308", // Solar Gold
+  "#6fa8f6", // Muted Sapphire
+  "#43c6b8", // Celadon Teal
+  "#e2a04b", // Warm Sandstone
+  "#9f88ea", // Dusty Violet
+  "#4ec087", // Sage Emerald
+  "#dc7ca4", // Muted Rose
+  "#58b8e5", // Glacier Cyan
+  "#d4b14c", // Pale Ochre
 ] as const;
 
 export const CLUSTER_PALETTE_LIGHT = [
-  "#2563eb",
-  "#0d9488",
-  "#d97706",
-  "#7c3aed",
-  "#059669",
-  "#db2777",
-  "#0284c7",
-  "#ca8a04",
+  "#2a5ec4",
+  "#137f75",
+  "#b56918",
+  "#6648c4",
+  "#198253",
+  "#b6346c",
+  "#1577a8",
+  "#9b7612",
 ] as const;
 
 export const DEFAULT_UNIVERSE_SETTINGS: UniverseSettings = {
+  visualizationMode: "graph",
   starSize: 1.0,
   connectionOpacity: 0.24,
   labelDensity: "medium",
   clusterSpacing: 1.0,
+  showBackgroundStars: true,
   showIsolated: true,
+  orbitalMotion: false,
   focusDepth: 1,
   reducedEffects: false,
 };
@@ -48,6 +51,11 @@ export function loadUniverseSettings(): UniverseSettings {
     if (!raw) return { ...DEFAULT_UNIVERSE_SETTINGS };
     const parsed = JSON.parse(raw) as Partial<UniverseSettings>;
     return {
+      visualizationMode:
+        parsed.visualizationMode === "orbit" ||
+        parsed.visualizationMode === "graph"
+          ? parsed.visualizationMode
+          : DEFAULT_UNIVERSE_SETTINGS.visualizationMode,
       starSize:
         typeof parsed.starSize === "number" && Number.isFinite(parsed.starSize)
           ? Math.max(0.6, Math.min(1.6, parsed.starSize))
@@ -68,10 +76,18 @@ export function loadUniverseSettings(): UniverseSettings {
         Number.isFinite(parsed.clusterSpacing)
           ? Math.max(0.7, Math.min(1.6, parsed.clusterSpacing))
           : DEFAULT_UNIVERSE_SETTINGS.clusterSpacing,
+      showBackgroundStars:
+        typeof parsed.showBackgroundStars === "boolean"
+          ? parsed.showBackgroundStars
+          : DEFAULT_UNIVERSE_SETTINGS.showBackgroundStars,
       showIsolated:
         typeof parsed.showIsolated === "boolean"
           ? parsed.showIsolated
           : DEFAULT_UNIVERSE_SETTINGS.showIsolated,
+      orbitalMotion:
+        typeof parsed.orbitalMotion === "boolean"
+          ? parsed.orbitalMotion
+          : DEFAULT_UNIVERSE_SETTINGS.orbitalMotion,
       focusDepth:
         parsed.focusDepth === 1 || parsed.focusDepth === 2
           ? parsed.focusDepth
@@ -102,6 +118,8 @@ export interface GraphNodeModel {
   relPath: string;
   title: string;
   folder: string;
+  folderPath: string;
+  folderSegments: string[];
   clusterKey: string;
   subclusterKey: string;
   clusterColorIndex: number;
@@ -109,6 +127,7 @@ export interface GraphNodeModel {
   origin: NoteOrigin;
   parseStatus: ParseStatus;
   verification: VerificationStatus;
+  pinned: boolean;
   incomingCount: number;
   outgoingCount: number;
   selfLinkCount: number;
@@ -151,6 +170,7 @@ export interface GraphFilterCriteria {
   folder: string;
   tag: string;
   hideIsolated?: boolean;
+  focusNodeIds?: Set<string> | null;
 }
 
 export interface FilteredGraphModel {
@@ -185,6 +205,11 @@ function stableSubclusterKey(relPath: string): string {
     return parts[1] ?? "";
   }
   return "";
+}
+
+function extractFolderSegments(relPath: string): string[] {
+  const parts = relPath.split("/").filter(Boolean);
+  return parts.length > 1 ? parts.slice(0, -1) : [];
 }
 
 export function normalizeGraphSnapshot(
@@ -298,11 +323,16 @@ export function normalizeGraphSnapshot(
     const degree = incomingCount * 1.6 + outgoingCount * 0.6;
     const importance = 1 + Math.min(1.65, Math.log1p(degree) * 0.52);
 
+    const folderSegments = extractFolderSegments(raw.rel_path);
+    const folderPath = folderSegments.join("/");
+
     return {
       id: raw.id,
       relPath: raw.rel_path,
       title: raw.title || raw.rel_path || raw.id,
       folder: raw.folder,
+      folderPath,
+      folderSegments,
       clusterKey,
       subclusterKey: stableSubclusterKey(raw.rel_path),
       clusterColorIndex: clusterColorMap.get(clusterKey) ?? 0,
@@ -310,6 +340,7 @@ export function normalizeGraphSnapshot(
       origin: raw.origin,
       parseStatus: raw.parse_status,
       verification: raw.verification,
+      pinned: Boolean(raw.pinned),
       incomingCount,
       outgoingCount,
       selfLinkCount,
@@ -348,8 +379,13 @@ export function filterGraphModel(
   const folder = criteria.folder.trim();
   const tag = criteria.tag.trim().toLowerCase();
   const hideIsolated = Boolean(criteria.hideIsolated);
+  const focusIds = criteria.focusNodeIds ?? null;
   const isFiltered =
-    q.length > 0 || folder.length > 0 || tag.length > 0 || hideIsolated;
+    q.length > 0 ||
+    folder.length > 0 ||
+    tag.length > 0 ||
+    hideIsolated ||
+    (focusIds !== null && focusIds.size > 0);
 
   if (!isFiltered) {
     const matchedIds = new Set(model.nodes.map((n) => n.id));
@@ -364,6 +400,9 @@ export function filterGraphModel(
   }
 
   const matchedNodes = model.nodes.filter((node) => {
+    if (focusIds && focusIds.size > 0 && !focusIds.has(node.id)) {
+      return false;
+    }
     if (hideIsolated && node.isIsolated) {
       return false;
     }

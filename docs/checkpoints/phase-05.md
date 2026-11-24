@@ -78,8 +78,21 @@ Mandatory Phase 4 data-integrity, watcher reliability, and bundle-splitting reme
 - **Semantic Zoom (L1–L4) & AABB Collision-Free Labels (`computeVisibleLabels`):**
   - Transitions smoothly across `L1 Overview` → `L2 Galaxies` → `L3 Cluster` → `L4 Focus`, enforcing strict `7px`-padded screen-space AABB collision rejection, safe-zone margins clear of floating HUD pills, and `<= 14%` viewport area cap across `low` (10), `medium` (22), and `high` (34) density settings.
 - **Floating Universe HUD, Graph Settings & Collapsible Inspector ([UniverseView.tsx](file:///C:/DaffaP/Project%20df/Personal%20Brain/apps/desktop/src/features/universe/UniverseView.tsx), [ExclusionsModal.tsx](file:///C:/DaffaP/Project%20df/Personal%20Brain/apps/desktop/src/features/universe/ExclusionsModal.tsx)):**
-  - Full-bleed cosmos stage with floating translucent top-left filters (search, compact galaxy/tag selects, Isolated toggle, Clear Filters), top-right telemetry/mode/Display popover/refresh controls, bottom-left camera dock + edge legend, and a collapsible + drag-resizable (`260–440px`) Star Inspector (collapsed to a corner chip when empty).
-  - Persisted `UniverseSettings` in `localStorage` (`pb.pref.universeSettings`) and shared Exclusions modal wired into both Universe Display settings and [SettingsView.tsx](file:///C:/DaffaP/Project%20df/Personal%20Brain/apps/desktop/src/features/settings/SettingsView.tsx).
+  - Full-bleed cosmos stage with floating translucent top-left filters (search with `Enter`-to-focus, compact folder/tag selects, Isolated toggle, Clear Filters), top-right telemetry/`Orbit`·`Graph`·`List` mode toggle/Display popover/refresh controls, bottom-left camera dock + `Parent Orbit` + edge legend, and a collapsible + drag-resizable (`272–440px`) floating contextual Note Inspector (collapsed to a corner chip when nothing is selected).
+  - Persisted `UniverseSettings` in `localStorage` (`pb.pref.universeSettings`: `visualizationMode`, star/planet size, orbit/cluster spacing, connection opacity, label density, background starfield visibility, isolated visibility, gentle orbital motion disabled by default, 1/2-hop focus depth, performance mode) and shared Exclusions modal wired into both Universe Display settings and [SettingsView.tsx](file:///C:/DaffaP/Project%20df/Personal%20Brain/apps/desktop/src/features/settings/SettingsView.tsx).
+
+### 5.4 Original Orbital Knowledge System ([orbitalLayout.ts](file:///C:/DaffaP/Project%20df/Personal%20Brain/apps/desktop/src/features/universe/orbitalLayout.ts), [OrbitalCanvas.tsx](file:///C:/DaffaP/Project%20df/Personal%20Brain/apps/desktop/src/features/universe/OrbitalCanvas.tsx))
+
+- **Clean-Room Implementation:** Built independently using `three@0.187.0` and our `brain-core` contracts; no source code, shaders, textures, or styles were inspected or copied from external PolyForm-licensed plugins.
+- **Data-to-Celestial Hierarchy & Pinned Identity:**
+  - Exposed `GraphNodeDto.pinned` from `state.sqlite` (`note_status`) in [types.rs](file:///C:/DaffaP/Project%20df/Personal%20Brain/crates/brain-core/src/domain/types.rs) and [retrieval/mod.rs](file:///C:/DaffaP/Project%20df/Personal%20Brain/crates/brain-core/src/retrieval/mod.rs) alongside full `folderSegments`.
+  - **Active Vault** renders as a non-pickable central celestial core; **top-level folders** form primary orbital systems; **nested subfolders** (up to depth 3 with deeper notes folded onto depth-3 belts) form secondary orbital systems/belts; **Markdown notes** render as spherical planets (`pinned` notes distinguished by tilted golden equatorial rings and subtle size prominence); **actual resolved edges** remain cosmic filaments without fabricating hierarchy links.
+- **Deterministic Non-Overlapping Orbital Layout (`createOrbitalLayout`):**
+  - Bottom-up envelope calculation packs connected notes onto inner concentric belts and isolated notes onto outer belts with minimum arc clearance so dense folders (`1,000–2,507` notes) never collapse onto one ring; sibling subfolder and top-level systems occupy staggered heliocentric orbital shells spaced strictly beyond `r_A + r_B + gap` to prevent collisions across refreshes.
+- **Procedural Celestial Shaders & ~7-Draw-Call Pipeline (`OrbitalCanvas.tsx`):**
+  - Central Vault Core (`SphereGeometry` + Fresnel photosphere `ShaderMaterial`), single `InstancedMesh` for all planets (heliocentric directional lighting from `(0,0,0)`, Fresnel atmospheric rim glow, analytical latitude striping, focus dimming), instanced pinned-note rings, instanced clickable folder hub anchors, batched orbital rings (`LineSegments`), dual-layer wikilink filaments, billboarded selection/hover halos, and non-pickable background starfield.
+  - Supports `Orbit` semantic zoom + `computeOrbitalLabels` (AABB collision rejection), `Parent Orbit` + breadcrumb navigation, `Focus Connections` subgraph isolation, and guarded **Safe Markdown Excerpt** rendering inside the floating Note Inspector via [SafeMarkdownPreview.tsx](file:///C:/DaffaP/Project%20df/Personal%20Brain/apps/desktop/src/features/editor/SafeMarkdownPreview.tsx).
+  - Kept `visualizationMode` default as `"graph"` until live interactive visual acceptance is signed off (`"orbit"` is selectable immediately in the toolbar).
 
 ---
 
@@ -95,7 +108,7 @@ Mandatory Phase 4 data-integrity, watcher reliability, and bundle-splitting reme
 
 - **Backend & Tauri Adapter:** `crates/brain-core/src/domain/types.rs`, `crates/brain-core/src/state/vault_state.rs`, `crates/brain-core/src/index/store.rs`, `crates/brain-core/src/vault/{engine.rs,paths.rs,scan.rs,watcher.rs}`, `crates/brain-core/src/retrieval/mod.rs`, `crates/brain-core/tests/phase5_remediation.rs`, `crates/brain-core/examples/perf_baseline.rs`, `apps/desktop/src-tauri/src/lib.rs`
 - **Frontend & Build:** `package-lock.json`, `apps/desktop/package.json`, `apps/desktop/vite.config.ts`, `apps/desktop/src/lib/contracts.ts`, `apps/desktop/src/lib/ipc.ts`, `apps/desktop/src/styles/app.css`, `apps/desktop/src/features/shell/ActivityRail.tsx`, `apps/desktop/src/features/shell/StatusBar.tsx`, `apps/desktop/src/features/editor/EditorWorkspace.tsx`, `apps/desktop/src/features/settings/SettingsView.tsx`, `apps/desktop/src/app/App.tsx`
-- **Universe Module & Tests:** `apps/desktop/src/features/universe/{graphModel.ts,layout3d.ts,GalaxyCanvas.tsx,UniverseView.tsx,ExclusionsModal.tsx,graphModel.test.ts,UniverseView.test.tsx}`, `apps/desktop/src/app/{App.test.tsx,App.onboarding.test.tsx}`, `apps/desktop/src/features/editor/EditorWorkspace.test.tsx`
+- **Universe Module & Tests:** `apps/desktop/src/features/universe/{graphModel.ts,layout3d.ts,orbitalLayout.ts,GalaxyCanvas.tsx,OrbitalCanvas.tsx,UniverseView.tsx,ExclusionsModal.tsx,graphModel.test.ts,UniverseView.test.tsx}`, `apps/desktop/src/app/{App.test.tsx,App.onboarding.test.tsx}`, `apps/desktop/src/features/editor/EditorWorkspace.test.tsx`
 - **Docs & ADR:** `docs/adr/ADR-0007-threejs-universe-engine.md`, `docs/checkpoints/{phase-04.md,phase-05.md}`, `docs/MVP_TASKS.md`
 
 ---
@@ -108,8 +121,8 @@ Recorded in [ADR-0007-threejs-universe-engine.md](file:///C:/DaffaP/Project%20df
 
 ## 9. Security & Data Integrity Results
 
-- **Independent QA/Security Audit (`0f8190ea-fe25-41d2-b9a5-4058bac54acc`):** Verified `graphModel.ts`/`GalaxyCanvas.tsx` use no `innerHTML`, no remote fonts/textures, no CSP relaxation, no note bodies in graph DTOs, strict `externalHash` preservation on conflict overwrite, and full stale-base draft conflict isolation. Identified 1 blocking finding (`handleRestorePendingDraft` leaving `tab.conflict = null` on base mismatch), 1 major finding (`rAF` duplication during `OrbitControls.update()`), and 3 minor items (clearDraft safety on unacknowledged offers, `InstancedMesh.dispose()`/`computeBoundingSphere()`, watcher overflow count & trash-restore session guard) — **all 5 were fixed and all tests/builds re-run afterward**.
-- **Draft Isolation:** `phase5_remediation.rs` verified `editor_drafts` survive store reopen, preserve monotonic `draft_seq`, remain excluded from `search_notes` and cross-vault reads, and never alter authoritative `.md` files.
+- **Orbital Independent QA & Security Audit (`f7342d78-f34c-4ce3-ada3-8cad1d31d62f`):** Reported **0 Blocking**, **0 Major**, and 7 Minor observations across originality, CSP (`default-src 'self'`), zero remote textures/fonts/`innerHTML`, `SafeMarkdownPreview` excerpt safety, stale async excerpt race guards, `pinned` mapping, zero fabricated edges, GLSL `InstancedMesh` attribute validity, demand-driven `rAF`, and full WebGL disposal. Resolved 5 of those minor items (`useCallback` memoized `handleReadNoteExcerpt`, right-click `ev.button !== 0` guard in both canvases, live Light/Dark theme sync for orbital rings/hubs/pinned rings, dynamic `controls.maxDistance` scaling for wide vaults, deleted/excluded `focusConnectionsNoteId` fallback, and effective `orbitalMotion` checkbox state) and re-ran all quality gates and builds afterward.
+- **Draft Isolation & Exclusion Integrity:** `phase5_remediation.rs` verified `editor_drafts` survive reopen without polluting `search_notes`, `persistent_exclusions` preserve disk files and backups (`4/4`), and `GraphNodeDto.pinned` matches `state.sqlite`.
 
 ---
 
@@ -118,62 +131,65 @@ Recorded in [ADR-0007-threejs-universe-engine.md](file:///C:/DaffaP/Project%20df
 | Suite | Command | Scope & Type | Result |
 |---|---|---|---|
 | Quality Gate Script | `powershell -ExecutionPolicy Bypass -File scripts/verify-all.ps1` | ESLint, `tsc --noEmit`, Vitest, `cargo fmt`, `cargo clippy`, Cargo tests | Exit `0` (`ALL_QUALITY_GATES_PASSED`) |
-| Impeccable Design Detector | `impeccable.cmd detect --json UniverseView.tsx GalaxyCanvas.tsx ExclusionsModal.tsx app.css` | Static UI anti-pattern scan | `0` findings in Universe components/CSS (`1` pre-existing warning on unrelated `.pb-preview-prose blockquote` at `app.css:858`) |
-| Frontend Vitest | `npm --workspace @personal-brain/desktop run test` | `jsdom` unit, label-overlap, settings, exclusion modal & lifecycle tests | `7` files, `22/22` passed (`3.54s`) |
-| Rust Unit & Integration | `cargo test --workspace --locked` | Native Windows Rust, exclusions, SQLite/watcher/junction tests | `21/21` passed across all suites (`brain-mcp`: 0, `desktop`: 0 unit tests) |
-| Frontend Production Build | `npm --workspace @personal-brain/desktop run build` | Split bundle verification (`dist/index.html` excludes Three.js) | Exit `0` (`684 ms`): entry `320.23 kB` (`94.35 kB` gzip), `UniverseView` `43.22 kB` (`13.99 kB` gzip), `vendor-three` `554.59 kB` (`136.38 kB` gzip) |
-| Rust Release Build | `cargo build --release --workspace --locked` | Optimized native Windows desktop + MCP binaries | Exit `0` (`42.11s`) |
+| Impeccable Design Detector | `impeccable.cmd detect --json UniverseView.tsx OrbitalCanvas.tsx GalaxyCanvas.tsx ExclusionsModal.tsx app.css` | Static UI anti-pattern scan | `0` findings in Universe components/CSS (`1` pre-existing warning on unrelated `.pb-preview-prose blockquote` at `app.css:858`) |
+| Frontend Vitest | `npm --workspace @personal-brain/desktop run test` | `jsdom` unit, orbital layout, label-overlap, excerpt, settings, exclusion modal & lifecycle tests | `7` files, `23/23` passed (`5.49s`) |
+| Rust Unit & Integration | `cargo test --workspace --locked` | Native Windows Rust, `pinned` DTOs, exclusions, SQLite/watcher/junction tests | `21/21` passed across all suites (`brain-mcp`: 0, `desktop`: 0 unit tests) |
+| Frontend Production Build | `npm --workspace @personal-brain/desktop run build` | Split bundle verification (`dist/index.html` excludes Three.js) | Exit `0` (`776 ms`): entry `321.02 kB` (`94.57 kB` gzip), `UniverseView` `80.98 kB` (`23.29 kB` gzip), `vendor-three` `560.25 kB` (`137.96 kB` gzip) |
+| Rust Release Build | `cargo build --release --workspace --locked` | Optimized native Windows desktop + MCP binaries | Exit `0` (`0.59s` incremental relink after `1m 12s` full build) |
 
 ---
 
 ## 11. Native Runtime Evidence
 
 - Launched `target\release\personal-brain.exe` after the final code edit (`2026-11-24`):
-  - `PID=27632`, `READY=True`, `RESPONDING=True`, `HWND=1509876`, elapsed `2444 ms`
-  - Host process: `33.56 MB` Working Set, `0.11s` CPU
-  - WebView2 child tree (`6` `msedgewebview2.exe` processes): `295.87 MB` combined Working Set, `1.12s` CPU (total tree RSS **`329.43 MB`**)
-  - Shutdown probe via `CloseMainWindow()`: `CLOSE_SENT=True`, `CLEAN_EXIT=False` within the 5-second `WaitForExit(5000)` timeout.
+  - `PID=33124`, `READY=True`, `RESPONDING=True`, `HWND=7279586`, elapsed `2465 ms`
+  - Host process: `45.47 MB` Working Set, `0.17s` CPU
+  - WebView2 child tree (`6` `msedgewebview2.exe` processes): `305.35 MB` combined Working Set, `1.06s` CPU (total tree RSS **`350.82 MB`**)
+  - Shutdown probe via `CloseMainWindow()`: `CLOSE_SENT=True`, `CLEAN_EXIT=False` within the 8-second `WaitForExit(8000)` timeout.
 
 ---
 
 ## 12. Visual Verification Evidence (`UNVERIFIED` Interactive WebGL Notice)
 
-- **Automated Interactive WebGL / 10-State Visual Screenshots / Live GPU FPS:** **`UNVERIFIED`** (`NOT RUN` — headless `jsdom` does not provide a WebGL GPU context, and automated desktop GUI screenshot/input driving was not executed).
-- **Required Owner Acceptance Steps:** Launch `target\release\personal-brain.exe` (or `npm --workspace @personal-brain/desktop run tauri dev`) and verify before/after visuals and smoothness across Galaxy overview (`L1`), Cluster view (`L2`/`L3`), Selected star (`L4` incoming amber / outgoing cyan filaments), Filtered view (`Hide Isolated` + folder/tag), dense vault (`2,507`-node real vault before & after exclusions), `F100`, empty vault, Light & Dark themes at `1366×768` and `900×600`, Inspector collapse/resize, Display Settings, Exclusions preview/apply, and repeated Universe entry/exit on iGPU & RTX 2050.
+- **Automated Interactive WebGL / Before-and-After Screenshots / Live GPU FPS:** **`UNVERIFIED`** (`NOT RUN` — headless `jsdom` does not provide a WebGL GPU context, and automated desktop GUI screenshot/input driving was not executed). Per §10 of the design brief, `visualizationMode` remains `"graph"` by default until your interactive visual & functional sign-off promotes `"orbit"` to default.
+- **Required Owner Acceptance Steps:** Launch `target\release\personal-brain.exe` (or `npm --workspace @personal-brain/desktop run tauri dev`), switch between **`Graph`**, **`Orbit`**, and **`List`**, and verify before/after visuals and smoothness across Overview (`L1`), Subfolders (`L2`/`L3`), Selected planet (`L4` incoming amber / outgoing cyan filaments + pinned rings + Safe Markdown excerpt + `Focus Connections` + `Parent Orbit`), dense vault (`2,507`-node real vault before & after exclusions), `F100`, empty vault, Light & Dark themes at `1366×768` and `900×600`, Display Settings (`Planet/Star Size`, `Orbit/Cluster Spacing`, `Show background starfield`, `Gentle orbital motion`), Exclusions preview/apply, and repeated Universe entry/exit on iGPU & RTX 2050.
 
 ---
 
 ## 13. Core, Bundle & Layout Performance Benchmark Results (`REM-045`, `REM-048`, `F2507`)
 
-Measured on `target\release\examples\perf_baseline.exe` (Windows 11 release build, deterministic synthetic LCG vaults `F0`, `F100`, `F1000`, `F2507`):
+Measured on `target\release\examples\perf_baseline.exe` (Windows 11 release build matching current `brain-core`, deterministic synthetic LCG vaults `F0`, `F100`, `F1000`, `F2507`):
 
 | Fixture | Notes | Edges | Open (ms) | Read (ms) | Save (ms) | Search P50 (ms) | Search P95 (ms) | Graph DTO (ms) | Rebuild (ms) | Backup (ms) |
 |---|---|---|---|---|---|---|---|---|---|---|
-| `F0` | `0` | `0` | `64.05` | — | — | `3.38` | `4.13` | `3.76` | `100.25` | `8.65` |
-| `F100` | `100` | `198` | `83.02` | `2.83` | `28.21` | `5.41` | `6.39` | `4.62` | `69.73` | `150.55` |
-| `F1000` | `1000` | `1997` | `223.77` | `4.58` | `65.34` | `12.45` | `14.82` | `15.40` | `133.60` | `890.13` |
-| `F2507` | `2507` | `173` | `422.53` | `7.97` | `45.31` | `19.13` | `25.63` | `25.56` | `297.67` | `2626.11` |
+| `F0` | `0` | `0` | `61.20` | — | — | `5.61` | `8.41` | `6.41` | `36.91` | `13.49` |
+| `F100` | `100` | `198` | `133.90` | `8.10` | `52.80` | `11.58` | `16.99` | `11.50` | `75.37` | `152.43` |
+| `F1000` | `1000` | `1997` | `429.74` | `19.63` | `132.45` | `27.18` | `45.46` | `32.61` | `241.37` | `1375.53` |
+| `F2507` | `2507` | `173` | `781.65` | `19.81` | `88.76` | `36.16` | `64.78` | `51.98` | `448.76` | `4195.47` |
 
-Pure-TS `layout3d.ts` + `graphModel.ts` CPU timings (Node `v26.10.0` via Vite SSR):
-- `F100` (`100` / `198`): normalize `7.66 ms`, init `1.10 ms`, settle `15.14 ms` (`66` steps, `0.23 ms/step`)
-- `F1000` (`1000` / `1997`): normalize `2.64 ms`, init `1.61 ms`, settle `151.18 ms` (`68` steps, `2.22 ms/step`)
-- `F2507` (`2507` / `173`): normalize `3.41 ms`, init `2.00 ms`, settle `322.04 ms` (`68` steps, `4.74 ms/step`)
+Pure-TS `layout3d.ts`, `orbitalLayout.ts`, and `graphModel.ts` CPU timings (Node `v26.10.0` via Vite SSR):
+- **Orbital (`orbitalLayout.ts`):**
+  - `F100` (`100` / `198`): normalize `9.40 ms`, orbital compute `1.89 ms` (`21` systems, `35` rings, `boundingRadius 120.7`)
+  - `F1000` (`1000` / `1997`): normalize `3.48 ms`, orbital compute `2.68 ms` (`21` systems, `95` rings, `boundingRadius 247.0`)
+  - `F2507` (`2507` / `173`): normalize `5.04 ms`, orbital compute `3.99 ms` (`21` systems, `125` rings, `boundingRadius 317.6`)
+- **Force Graph (`layout3d.ts`):**
+  - `F100`: settle `15.14 ms` (`66` steps, `0.23 ms/step`); `F1000`: settle `151.18 ms` (`68` steps, `2.22 ms/step`); `F2507`: settle `322.04 ms` (`68` steps, `4.74 ms/step`).
 
-- `F1000` Search P95 (`14.82 ms`) and `get_graph` DTO retrieval (`15.40 ms`) clear the `<300 ms` `NFR-004` ceiling.
-- Live WebView2 FPS / frame-time percentiles and post-Universe-exit heap deltas remain **`UNVERIFIED`** until exercised interactively on target GPU hardware.
+- `F1000` Search P95 (`45.46 ms`) and `get_graph` DTO retrieval (`32.61 ms`) clear the `<300 ms` `NFR-004` ceiling, and closed-form `orbitalLayout` computation completes in `< 4 ms` even at `2,507` notes.
+- Live WebView2 FPS / frame-time percentiles, draw-call profiler counts, and post-Universe-exit heap deltas remain **`UNVERIFIED`** until exercised interactively on target GPU hardware.
 
 ---
 
 ## 14. Resource Lifecycle Verification
 
-- Verified by static audit + React unmount checks (`UniverseView.test.tsx`): leaving Universe cancels `rAF`, removes `ResizeObserver`, pointer/wheel listeners, `webglcontextlost`, and `visibilitychange` listeners, calls `controls.dispose()`, disposes all `BufferGeometry`, `ShaderMaterial`, `LineBasicMaterial`, and `PointsMaterial` objects, and calls `renderer.dispose()`.
-- Verified via [GalaxyCanvas.tsx](file:///C:/DaffaP/Project%20df/Personal%20Brain/apps/desktop/src/features/universe/GalaxyCanvas.tsx): `rAF` halts when `sim.settled && !controlsMoved && !flyAnimRef.current` or when `document.visibilityState === "hidden"`.
+- Verified by static audit + React unmount checks (`UniverseView.test.tsx`): leaving Universe cancels `rAF`, removes `ResizeObserver`, pointer/wheel listeners, `webglcontextlost`, and `visibilitychange` listeners, calls `controls.dispose()`, disposes all `BufferGeometry`, `ShaderMaterial`, `LineBasicMaterial`, `PointsMaterial`, and `InstancedMesh` objects across both `OrbitalCanvas` and `GalaxyCanvas`, and calls `renderer.dispose()`.
+- Verified via [OrbitalCanvas.tsx](file:///C:/DaffaP/Project%20df/Personal%20Brain/apps/desktop/src/features/universe/OrbitalCanvas.tsx) and [GalaxyCanvas.tsx](file:///C:/DaffaP/Project%20df/Personal%20Brain/apps/desktop/src/features/universe/GalaxyCanvas.tsx): `rAF` halts when idle (`orbitalMotion` OFF by default, `sim.settled`, `!controlsMoved`, `!flyAnimRef.current`) or when `document.visibilityState === "hidden"`.
 
 ---
 
 ## 15. Requirement Traceability
 
-- **FR-011 / FR-012 / FR-013 (`AC-018`–`AC-021`):** Graph DTOs, cluster & subcluster organic layout, GLSL shader star rendering, cosmic filaments, semantic zoom L1–L4, AABB label collision rejection, floating HUD, Graph Settings, Vault Indexing Exclusions with preview, collapsible/resizable Star Inspector, Editor navigation, filtering, and keyboard List fallback implemented and unit/integration tested; GPU FPS/visual layout (`AC-021` visual half) awaits owner check.
+- **FR-011 / FR-012 / FR-013 (`AC-018`–`AC-021`):** Graph DTOs (`pinned` + folder paths), hierarchical `Orbit` system (`orbitalLayout.ts` + `OrbitalCanvas.tsx`), `Graph` cosmos (`layout3d.ts` + `GalaxyCanvas.tsx`), semantic zoom L1–L4, AABB label collision rejection, floating HUD, Graph Settings, Vault Indexing Exclusions with preview, collapsible/resizable floating Note Inspector with Safe Markdown Excerpt & `Focus Connections`, Editor navigation, filtering, and keyboard List fallback implemented and unit/integration tested; live GPU FPS & 10-state visual acceptance awaits owner check.
 - **NFR-002 / NFR-003 / NFR-004 / NFR-009 / NFR-010 / NFR-011:** Durable draft isolation, watcher backoff/overflow retention + exclusion filtering, strict optimistic concurrency, reduced-motion static equilibrium, CSP & HTML sanitization verified.
 
 ---
@@ -202,3 +218,33 @@ Phase 6 (`PB-022`–`PB-025`: MCP Server & Shared Memory) depends cleanly on `br
 | Engineering Orchestrator | Ready for Review | `REM-041`–`REM-048`, `PB-019`–`PB-020` complete; `PB-021` ready for visual/GPU check | 2026-11-24 |
 | Independent QA / Security Reviewer | Verified Remediated | All 5 audit findings (`1` Blocking, `1` Major, `3` Minor) fixed & re-verified (`20/20` Vitest, `20/20` Rust) | 2026-11-24 |
 | Product Owner | `[ ] Approve / [ ] Approve with changes / [ ] Reject` | Verify interactive Universe screenshots & GPU smoothness; authorize Phase 6 | — |
+
+## 19. Orbital visual refinement verification (2026-11-24)
+
+**PB-021 remains IN_REVIEW.** This entry records the latest verification of the working tree based on `ab7c53b`. Earlier native screenshot and timing gaps describe prior runs. Owner acceptance remains open.
+
+- Orbit uses real folder and note data, packs notes into adaptive belts, and represents up to three nested folder levels. Overview rendering samples dense links. Detail and connection focus expose the underlying links. Graph remains the default, and List remains available as a selectable mode and WebGL fallback.
+- The renderer uses original procedural lighting and shading, projected bounds for camera fit, screen-space label collision checks, reusable GPU buffers, and explicit WebGL disposal. The floating controls and contextual inspector retain editor navigation and the existing vault exclusion workflows. No new runtime dependencies or changes to vault storage, editor behavior, or IPC permissions were introduced by the visual refinement.
+- Separate rendering, layout, and UX agents contributed changes. Read-only cross-review verified renderer disposal and found List docking and stale camera focus issues. Both were corrected and followed by native checks.
+
+### Verification
+
+| Scope | Evidence |
+|---|---|
+| Windows quality gate | From the repository root, `powershell -ExecutionPolicy Bypass -File scripts/verify-all.ps1` exited 0. ESLint, TypeScript, 26 Vitest tests, Rust formatting, Clippy, and 21 Rust tests passed. |
+| Release executable | From `apps/desktop`, `../../node_modules/.bin/tauri.cmd build --no-bundle` exited 0 and built `target/release/personal-brain.exe`. Vite reported its existing chunk-size warning for CodeMirror and Three.js. |
+| FR-011, AC-018 | Native Orbit reported 100 notes/100 resolved links in F100 and 1,000 notes/2,500 resolved links in F1000. The generator now prevents duplicate targets per source so the fixture meets the declared edge count. |
+| FR-012, AC-019 | Native smoke covered direct planet selection, note excerpt, connection focus, folder focus, parent navigation, opening the selected note in CodeMirror, and applying then removing an exclusion on F100. Watcher and graph reconciliation passed automated coverage. Live edit-to-graph synchronization was outside this native trace. |
+| FR-012, AC-020 | Native F100 folder filter reduced the visible set to 25 notes. The tag filter narrowed it further. Filter clearing, keyboard search, and camera reset passed the exercised flow. |
+| FR-013, NFR-011 | Native Graph, Orbit, and List switching passed. With WebGL disabled, F100 exposed all 100 notes in List. Empty vault handling, keyboard-accessible controls in the component suite, and compact light-mode rendering were checked. |
+| AC-021, NFR-005 | RTX 2050 native WebView2 measurement completed. Intel UHD qualification and owner visual sign-off remain open. |
+
+Windows 11 Pro build 26100, MSVC x64, WebView2 158.0.4370.33, ANGLE D3D11 on GeForce RTX 2050, 1228×772 canvas, 200 Hz display. A 120-step native input drag on F1000 drove frame-callback sampling and WebGL disjoint GPU timer queries. These timings describe the captured overview trace. Input to the next render callback is a software latency measurement and excludes presentation.
+
+| F1000 configuration | Median frame cadence | P95 frame interval | Max frame interval | GPU median / P95 | Input → callback P95 |
+|---|---:|---:|---:|---:|---:|
+| Before | 200 FPS | 5.1 ms | 5.3 ms | 0.92 / 4.20 ms | 0.5 ms |
+| After | 200 FPS | 5.2 ms | 10.7 ms | 0.18 / 0.20 ms | 0.2 ms |
+| After with orbital motion enabled | 200 FPS | 5.2 ms | 12.2 ms | 0.20 / 0.21 ms | 0.2 ms |
+
+Before and after screenshots captured from the native WebView2 window accompany the handover. They include F100 and F1000 overviews, the selected-note inspector, folder focus, List, exclusions preview, and a light-mode 900×600 viewport. Final native runs closed within eight seconds. Intel adapter selection, long-run GPU memory measurement, the larger F2507 scenario, and installer lifecycle remain unqualified. The earlier note-commit and draft-recovery findings remain outside this visual change. Recovery for the UI refinement is to switch the Universe to Graph or List. Phase 6 awaits authorization.

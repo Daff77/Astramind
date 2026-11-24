@@ -273,6 +273,7 @@ fn graph_snapshot_preserves_stable_ids_cycles_self_links_isolated_nodes_and_unic
     )
     .unwrap();
 
+    VaultEngine::set_pinned(&paths, &vid, &a.note_id, true).unwrap();
     let graph = get_graph(&paths, &vid).unwrap();
     assert_eq!(graph.nodes.len(), 3);
 
@@ -280,6 +281,8 @@ fn graph_snapshot_preserves_stable_ids_cycles_self_links_isolated_nodes_and_unic
     let node_b = graph.nodes.iter().find(|n| n.id == b.note_id).unwrap();
     let node_iso = graph.nodes.iter().find(|n| n.id == iso.note_id).unwrap();
 
+    assert!(node_a.pinned);
+    assert!(!node_b.pinned);
     assert_eq!(node_a.folder, "cluster-a");
     assert_eq!(node_a.title, "SharedTitle");
     assert_eq!(node_b.title, "SharedTitle");

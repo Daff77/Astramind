@@ -288,6 +288,8 @@ pub struct GraphNodeDto {
     pub verification: VerificationStatus,
     pub incoming_count: u32,
     pub outgoing_count: u32,
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

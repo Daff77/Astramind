@@ -1476,6 +1476,14 @@ export function App() {
     [loadNoteDetails, refreshVaultCatalog],
   );
 
+  const handleReadNoteExcerpt = useCallback(async (noteId: string) => {
+    const vault = activeVaultRef.current;
+    if (!vault) {
+      throw new Error("No active vault");
+    }
+    return readNote(vault.vault_id, noteId);
+  }, []);
+
   const renderContent = () => {
     if (showOnboarding || (!activeVault && navSection !== "settings")) {
       return (
@@ -1620,6 +1628,7 @@ export function App() {
           }
         >
           <LazyUniverseView
+            vaultName={activeVault.display_name}
             graphSnapshot={graphSnapshot}
             brokenLinks={brokenLinks}
             selectedNodeId={selectedUniverseNodeId}
@@ -1630,6 +1639,7 @@ export function App() {
             onOpenNote={(noteId) => {
               void openNoteById(noteId);
             }}
+            onReadNoteExcerpt={handleReadNoteExcerpt}
             onRefreshGraph={() => {
               void loadGraphForVault(
                 activeVault.vault_id,

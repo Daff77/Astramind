@@ -185,6 +185,7 @@ export interface GraphNodeDto {
   verification: VerificationStatus;
   incoming_count: number;
   outgoing_count: number;
+  pinned?: boolean;
 }
 
 export interface GraphEdgeDto {
@@ -270,12 +271,17 @@ export interface ExclusionPreviewDto {
 
 export type LabelDensity = "low" | "medium" | "high";
 
+export type UniverseVisualizationMode = "orbit" | "graph";
+
 export interface UniverseSettings {
+  visualizationMode: UniverseVisualizationMode;
   starSize: number;
   connectionOpacity: number;
   labelDensity: LabelDensity;
   clusterSpacing: number;
+  showBackgroundStars: boolean;
   showIsolated: boolean;
+  orbitalMotion: boolean;
   focusDepth: 1 | 2;
   reducedEffects: boolean;
 }

@@ -996,7 +996,9 @@ export const GalaxyCanvas = forwardRef<GalaxyCanvasHandle, GalaxyCanvasProps>(
       scene.add(hovRing);
 
       const bgStars = buildBackgroundStarfield(isDarkRef.current);
-      bgStars.visible = !settingsRef.current.reducedEffects;
+      bgStars.visible =
+        settingsRef.current.showBackgroundStars &&
+        !settingsRef.current.reducedEffects;
       scene.add(bgStars);
 
       const focusGeo = new THREE.BufferGeometry();
@@ -1084,6 +1086,7 @@ export const GalaxyCanvas = forwardRef<GalaxyCanvasHandle, GalaxyCanvasProps>(
       };
 
       const onPointerUp = (ev: PointerEvent) => {
+        if (ev.button !== 0) return;
         const moved = Math.hypot(ev.clientX - downX, ev.clientY - downY);
         if (moved > 5) return;
         const picked = pickNodeIndex(ev.clientX, ev.clientY);
@@ -1213,7 +1216,8 @@ export const GalaxyCanvas = forwardRef<GalaxyCanvasHandle, GalaxyCanvasProps>(
         controls.enableDamping = !reducedMotion;
       }
       if (bgStarsRef.current) {
-        bgStarsRef.current.visible = !settings.reducedEffects;
+        bgStarsRef.current.visible =
+          settings.showBackgroundStars && !settings.reducedEffects;
         const mat = bgStarsRef.current.material as THREE.PointsMaterial;
         mat.opacity = isDarkTheme ? 0.34 : 0.22;
       }
@@ -1257,6 +1261,7 @@ export const GalaxyCanvas = forwardRef<GalaxyCanvasHandle, GalaxyCanvasProps>(
       settings.starSize,
       settings.connectionOpacity,
       settings.labelDensity,
+      settings.showBackgroundStars,
       settings.focusDepth,
       settings.reducedEffects,
       searchQuery,

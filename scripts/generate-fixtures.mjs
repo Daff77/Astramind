@@ -84,10 +84,12 @@ function generateF1000(baseDir) {
     fs.mkdirSync(noteDir, { recursive: true });
     const slug = `Note-${String(i).padStart(4, "0")}`;
     const links = [];
+    const targets = new Set([i]);
     const perNote = i < 500 ? 3 : 2; // 500*3 + 500*2 = 2500 resolved edges
     for (let e = 0; e < perNote; e++) {
       let target = Math.floor(rng() * 1000);
-      if (target === i) target = (i + 1) % 1000;
+      while (targets.has(target)) target = (target + 1) % 1000;
+      targets.add(target);
       links.push(`[[Note-${String(target).padStart(4, "0")}]]`);
       edgeCount++;
     }
